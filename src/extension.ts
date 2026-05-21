@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
@@ -102,7 +102,40 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
 
-    openTerminal('New Project', cwd, `openbase new -n ${projectName} -s ${template.label}`);
+    const channel = vscode.window.createOutputChannel('OpenBase: New Project');
+    channel.show(true);
+
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+
+    const success = await new Promise<boolean>((resolve) => {
+        const child = exec(
+            `openbase new -n ${projectName} -s ${template.label}`,
+            { cwd, env }
+        );
+        child.stdout?.on('data', (d: string) => channel.append(d));
+        child.stderr?.on('data', (d: string) => channel.append(d));
+        child.on('close', (code) => resolve(code === 0));
+        child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
+    });
+
+    if (!success) {
+        vscode.window.showErrorMessage(`Failed to create project "${projectName}". Check the output for details.`);
+        return;
+    }
+
+    const projectUri = vscode.Uri.file(path.join(cwd, projectName));
+    const action = await vscode.window.showInformationMessage(
+        `Project "${projectName}" created successfully!`,
+        'Open Folder',
+        'Open in New Window'
+    );
+
+    if (action === 'Open Folder') {
+        vscode.commands.executeCommand('vscode.openFolder', projectUri, false);
+    } else if (action === 'Open in New Window') {
+        vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
+    }
 }
 
 // ─── scaffold ───────────────────────────────────────────────────────────────
