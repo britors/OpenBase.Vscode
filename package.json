@@ -4,10 +4,10 @@
   "description": "Visual Studio Code extension for OpenBase CLI",
   "version": "0.1.0",
   "publisher": "openbase",
+  "icon": "icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "icon": "icon.png",
   "categories": [
     "Other"
   ],
@@ -17,14 +17,96 @@
     "commands": [
       {
         "command": "openbase.newProject",
-        "title": "OpenBase: New Project"
+        "title": "OpenBase: New Project",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.scaffold",
+        "title": "OpenBase: Scaffold",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.scaffoldUpdate",
+        "title": "OpenBase: Scaffold Update",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.specialist",
+        "title": "OpenBase: Specialist",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.procedure",
+        "title": "OpenBase: Procedure",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.extensionAdd",
+        "title": "OpenBase: Add Extension",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.extensionList",
+        "title": "OpenBase: List Extensions",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.build",
+        "title": "OpenBase: Build",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.run",
+        "title": "OpenBase: Run",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.update",
+        "title": "OpenBase: Update CLI",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.history",
+        "title": "OpenBase: History",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.version",
+        "title": "OpenBase: Version",
+        "category": "OpenBase"
       }
     ],
     "menus": {
       "explorer/context": [
         {
           "command": "openbase.newProject",
-          "group": "navigation"
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@1"
+        },
+        {
+          "command": "openbase.scaffold",
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@2"
+        },
+        {
+          "command": "openbase.scaffoldUpdate",
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@3"
+        },
+        {
+          "command": "openbase.specialist",
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@4"
+        },
+        {
+          "command": "openbase.procedure",
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@5"
+        },
+        {
+          "command": "openbase.extensionAdd",
+          "when": "explorerResourceIsFolder",
+          "group": "openbase@6"
         }
       ]
     }
