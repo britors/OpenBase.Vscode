@@ -80,8 +80,8 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
 
     const projectName = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project',
-        prompt: 'Project name',
+        title: 'OpenBase: New Project (1/8) — Project name',
+        prompt: 'Project name (PascalCase, no spaces)',
         placeHolder: 'MyProject',
         validateInput: (v) => {
             if (!v.trim()) return 'Project name is required';
@@ -95,12 +95,69 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
             label: t,
             description: dbTemplateLabel(t),
         })),
-        { title: 'OpenBase: Select database template', placeHolder: 'Choose a database' }
+        { title: 'OpenBase: New Project (2/8) — Database template', placeHolder: 'Choose a database' }
     );
     if (!template) return;
 
+    const dbServerDefault = template.label === 'sqlserver' ? '.' : 'localhost';
+    const dbServer = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (3/8) — Database server',
+        prompt: 'Database server address (leave empty for default)',
+        placeHolder: dbServerDefault,
+        value: dbServerDefault,
+    });
+    if (dbServer === undefined) return;
+
+    const dbName = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (4/8) — Database name',
+        prompt: 'Database name (leave empty to use project name)',
+        placeHolder: projectName,
+        value: projectName,
+    });
+    if (dbName === undefined) return;
+
+    const dbUser = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (5/8) — Database user',
+        prompt: template.label === 'sqlserver'
+            ? 'Database user (leave empty for Windows Authentication)'
+            : 'Database user',
+        placeHolder: template.label === 'sqlserver' ? 'Windows Auth' : 'postgres',
+    });
+    if (dbUser === undefined) return;
+
+    const dbPassword = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (6/8) — Database password',
+        prompt: template.label === 'sqlserver'
+            ? 'Database password (leave empty for Windows Authentication)'
+            : 'Database password',
+        password: true,
+    });
+    if (dbPassword === undefined) return;
+
+    const mediatrLicense = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (7/8) — MediatR license',
+        prompt: 'MediatR commercial license key (leave empty if none)',
+        placeHolder: 'Leave empty if not applicable',
+    });
+    if (mediatrLicense === undefined) return;
+
+    const automapperLicense = await vscode.window.showInputBox({
+        title: 'OpenBase: New Project (8/8) — AutoMapper license',
+        prompt: 'AutoMapper commercial license key (leave empty if none)',
+        placeHolder: 'Leave empty if not applicable',
+    });
+    if (automapperLicense === undefined) return;
+
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
+
+    const args: string[] = [`-n ${projectName}`, `-s ${template.label}`];
+    if (dbServer.trim())           args.push(`--db-server "${dbServer.trim()}"`);
+    if (dbName.trim())             args.push(`--db-name "${dbName.trim()}"`);
+    if (dbUser.trim())             args.push(`--db-user "${dbUser.trim()}"`);
+    if (dbPassword.trim())         args.push(`--db-password "${dbPassword.trim()}"`);
+    if (mediatrLicense.trim())     args.push(`--mediatr-license "${mediatrLicense.trim()}"`);
+    if (automapperLicense.trim())  args.push(`--automapper-license "${automapperLicense.trim()}"`);
 
     const channel = vscode.window.createOutputChannel('OpenBase: New Project');
     channel.show(true);
@@ -109,10 +166,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
     const success = await new Promise<boolean>((resolve) => {
-        const child = exec(
-            `openbase new -n ${projectName} -s ${template.label}`,
-            { cwd, env }
-        );
+        const child = exec(`openbase new ${args.join(' ')}`, { cwd, env });
         child.stdout?.on('data', (d: string) => channel.append(d));
         child.stderr?.on('data', (d: string) => channel.append(d));
         child.on('close', (code) => resolve(code === 0));
