@@ -76,6 +76,12 @@
         "category": "OpenBase"
       }
     ],
+    "viewsWelcome": [
+      {
+        "view": "workbench.explorer.emptyView",
+        "contents": "[New OpenBase Project](command:openbase.newProject)"
+      }
+    ],
     "menus": {
       "explorer/context": [
         {
