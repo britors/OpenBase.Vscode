@@ -1,0 +1,45 @@
+{
+  "name": "openbase-vscode",
+  "displayName": "OpenBase CLI",
+  "description": "Visual Studio Code extension for OpenBase CLI",
+  "version": "0.1.0",
+  "publisher": "britors",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "openbase.newProject",
+        "title": "OpenBase: New Project"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "openbase.newProject",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.4.0"
+  }
+}
