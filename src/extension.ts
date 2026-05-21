@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { execSync } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
@@ -11,9 +13,15 @@ const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {
 type DbTemplate = typeof DB_TEMPLATES[number];
 type BuildConfig = typeof BUILD_CONFIGS[number];
 
+function dotnetToolsPath(): string {
+    return path.join(os.homedir(), '.dotnet', 'tools');
+}
+
 function isOpenBaseInstalled(): boolean {
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     try {
-        execSync('openbase --version', { stdio: 'ignore' });
+        execSync('openbase --version', { stdio: 'ignore', env });
         return true;
     } catch {
         return false;
@@ -21,7 +29,13 @@ function isOpenBaseInstalled(): boolean {
 }
 
 function openTerminal(name: string, cwd: string, command: string): void {
-    const terminal = vscode.window.createTerminal({ name: `OpenBase: ${name}`, cwd });
+    const extraPath = dotnetToolsPath();
+    const currentPath = process.env.PATH ?? '';
+    const terminal = vscode.window.createTerminal({
+        name: `OpenBase: ${name}`,
+        cwd,
+        env: { PATH: `${extraPath}${path.delimiter}${currentPath}` },
+    });
     terminal.show();
     terminal.sendText(command);
 }
