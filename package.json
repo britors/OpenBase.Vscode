@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.0.3",
+  "version": "10.0.4",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -101,22 +101,11 @@
       }
     ],
     "menus": {
-      "commandPalette": [
-        { "command": "openbase.scaffold",       "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.scaffoldUpdate", "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.specialist",     "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.procedure",      "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.extensionAdd",   "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.extensionList",  "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.build",          "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.run",            "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.update",         "when": "openbase.isOpenBaseProject" },
-        { "command": "openbase.history",        "when": "openbase.isOpenBaseProject" }
-      ],
+      "commandPalette": [],
       "view/title": [
         {
           "command": "openbase.specialist",
-          "when": "view == openbase.panel && openbase.isOpenBaseProject",
+          "when": "view == openbase.panel",
           "group": "1_openbase"
         }
       ],
