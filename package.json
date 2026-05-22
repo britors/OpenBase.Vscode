@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.0.4",
+  "version": "10.0.5",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -117,27 +117,27 @@
         },
         {
           "command": "openbase.scaffold",
-          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
+          "when": "explorerResourceIsFolder",
           "group": "openbase@2"
         },
         {
           "command": "openbase.scaffoldUpdate",
-          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
+          "when": "explorerResourceIsFolder",
           "group": "openbase@3"
         },
         {
           "command": "openbase.specialist",
-          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
+          "when": "explorerResourceIsFolder",
           "group": "openbase@4"
         },
         {
           "command": "openbase.procedure",
-          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
+          "when": "explorerResourceIsFolder",
           "group": "openbase@5"
         },
         {
           "command": "openbase.extensionAdd",
-          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
+          "when": "explorerResourceIsFolder",
           "group": "openbase@6"
         }
       ]

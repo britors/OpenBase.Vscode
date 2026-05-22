@@ -542,7 +542,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'newProject':   await this._new(msg.data as never, view);          break;
-            case 'scaffold':     await this._scaffold(msg.data as never, view);     break;
+            case 'scaffold':       await this._scaffold(msg.data as never, view);       break;
+            case 'scaffoldUpdate': await this._scaffoldUpdate(msg.data as never, view); break;
             case 'specialist':   await this._specialist(msg.data as never, view);   break;
             case 'procedure':    await this._procedure(msg.data as never, view);    break;
             case 'extensionAdd': await this._extensionAdd(msg.data as never, view); break;
@@ -585,13 +586,26 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         else if (action === 'Open in New Window') vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
     }
 
+    private async _scaffoldUpdate(d: { entity: string; schema: string; table: string; runMigrations: boolean }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'scu' }); return; }
+
+        const args = [`-e ${d.entity}`, '--update'];
+        if (d.schema)        args.push(`--schema "${d.schema}"`);
+        if (d.table)         args.push(`--table "${d.table}"`);
+        if (d.runMigrations) args.push('--run-migrations');
+
+        openTerminal('Scaffold Update', cwd, `openbase scaffold ${args.join(' ')}`);
+        view.webview.postMessage({ command: 'done', ctx: 'scu', text: 'Terminal aberto — confirme o diff e as alterações no terminal.' });
+    }
+
     private async _scaffold(d: { entity: string; mode: string; schema: string; table: string; runMigrations: boolean }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
 
         if (d.mode === 'codefirst') {
             openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
-            view.webview.postMessage({ command: 'done', ctx: 'sc' });
+            view.webview.postMessage({ command: 'done', ctx: 'sc', text: 'Terminal aberto — preencha as propriedades da entidade no terminal.' });
             return;
         }
         const args = [`-e ${d.entity}`, '--mode modelfirst'];
@@ -623,7 +637,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
         if (!d.name) {
             openTerminal('Procedure', cwd, 'openbase procedure');
-            view.webview.postMessage({ command: 'done', ctx: 'pr' });
+            view.webview.postMessage({ command: 'done', ctx: 'pr', text: 'Terminal aberto — selecione a procedure no terminal.' });
             return;
         }
         const args = [`-n ${d.name}`];
@@ -693,7 +707,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             child.stderr?.on('data', (chunk: string) => channel.append(chunk));
             child.on('close', (code) => {
                 if (code === 0) {
-                    view.webview.postMessage({ command: 'done', ctx });
+                    view.webview.postMessage({ command: 'done', ctx, text: 'Completed successfully.' });
                 } else {
                     view.webview.postMessage({ command: 'error', ctx, text: `Command failed (exit ${code}). Check the output panel.` });
                 }
@@ -744,6 +758,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     .btn-danger{width:100%;padding:6px;background:var(--vscode-statusBarItem-errorBackground,#c72e0f);color:#fff;margin-top:6px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
     .hidden{display:none!important}
     .err{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);display:none}
+    .ok{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-infoBackground);border:1px solid var(--vscode-inputValidation-infoBorder);display:none}
     .hint{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:6px}
   </style>
 </head>
@@ -751,6 +766,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <nav>
     <div class="nav-item active" data-page="new"     onclick="nav(this,'new')">New Project</div>
     <div class="nav-item"        data-page="sc"      onclick="nav(this,'sc')">Scaffold</div>
+    <div class="nav-item"        data-page="scu"     onclick="nav(this,'scu')">Scaffold Update</div>
     <div class="nav-item"        data-page="sp"      onclick="nav(this,'sp')">Specialist</div>
     <div class="nav-item"        data-page="pr"      onclick="nav(this,'pr')">Procedure</div>
     <div class="nav-item"        data-page="ext"     onclick="nav(this,'ext')">Extension</div>
@@ -786,6 +802,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
     <div id="new-err" class="err"></div>
+    <div id="new-ok" class="ok"></div>
     <button id="new-btn" class="btn-primary" onclick="submitNew()" data-label="Create Project">Create Project</button>
   </div>
 
@@ -805,7 +822,21 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     </div>
     <p id="sc-cf-hint" class="hint hidden">Um terminal será aberto para a coleta interativa de propriedades.</p>
     <div id="sc-err" class="err"></div>
+    <div id="sc-ok" class="ok"></div>
     <button id="sc-btn" class="btn-primary" onclick="submitScaffold()" data-label="Run Scaffold">Run Scaffold</button>
+  </div>
+
+  <!-- SCAFFOLD UPDATE -->
+  <div id="page-scu" class="page">
+    <p class="hint" style="margin-bottom:10px">Lê o schema do banco, compara com a entidade existente e regera os 16 arquivos dependentes de propriedades.</p>
+    <div class="field"><label>Entity *</label><input id="scu-entity" type="text" placeholder="Product"></div>
+    <div class="field"><label>Schema</label><input id="scu-schema" type="text" placeholder="dbo (auto-detect)"></div>
+    <div class="field"><label>Table</label><input id="scu-table" type="text" placeholder="(auto-detect from entity name)"></div>
+    <div class="field"><label class="check-label"><input id="scu-mig" type="checkbox"> Run migrations after update</label></div>
+    <p class="hint">Um terminal será aberto para exibir o diff e confirmar as alterações.</p>
+    <div id="scu-err" class="err"></div>
+    <div id="scu-ok" class="ok"></div>
+    <button id="scu-btn" class="btn-primary" onclick="submitScaffoldUpdate()" data-label="Run Scaffold Update">Run Scaffold Update</button>
   </div>
 
   <!-- SPECIALIST -->
@@ -834,6 +865,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       <p class="hint">Format: name:Type — same type list as above</p>
     </div>
     <div id="sp-err" class="err"></div>
+    <div id="sp-ok" class="ok"></div>
     <button id="sp-btn" class="btn-primary" onclick="submitSpecialist()" data-label="Generate Specialist">Generate Specialist</button>
   </div>
 
@@ -843,6 +875,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div class="field"><label>Schema</label><input id="pr-schema" type="text" placeholder="(auto-detect)"></div>
     <p class="hint">Deixe o nome em branco para listar as procedures do banco via terminal.</p>
     <div id="pr-err" class="err"></div>
+    <div id="pr-ok" class="ok"></div>
     <button id="pr-btn" class="btn-primary" onclick="submitProcedure()" data-label="Generate Procedure">Generate Procedure</button>
   </div>
 
@@ -862,6 +895,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       </select>
     </div>
     <div id="ext-err" class="err"></div>
+    <div id="ext-ok" class="ok"></div>
     <button id="ext-btn" class="btn-primary" onclick="submitExtension()" data-label="Add Extension">Add Extension</button>
   </div>
 
@@ -872,6 +906,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="field"><label class="check-label"><input id="build-nr" type="checkbox"> Skip restore (--no-restore)</label></div>
     <div id="build-err" class="err"></div>
+    <div id="build-ok" class="ok"></div>
     <button id="build-btn" class="btn-primary" onclick="submitBuild()" data-label="Build">Build</button>
   </div>
 
@@ -882,6 +917,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="field"><label class="check-label"><input id="run-nb" type="checkbox"> Skip build (--no-build)</label></div>
     <div id="run-err" class="err"></div>
+    <div id="run-ok" class="ok"></div>
     <button id="run-btn" class="btn-primary" onclick="submitRun()" data-label="Run">Run</button>
     <button id="run-stop" class="btn-danger hidden" onclick="stopRun()">Stop</button>
   </div>
@@ -890,6 +926,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <div id="page-history" class="page">
     <p class="hint" style="margin-bottom:10px">Exibe o histórico de gerações do projeto OpenBase.</p>
     <div id="history-err" class="err"></div>
+    <div id="history-ok" class="ok"></div>
     <button id="history-btn" class="btn-primary" onclick="submitHistory()" data-label="Show History">Show History</button>
   </div>
 
@@ -897,6 +934,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <div id="page-update" class="page">
     <p class="hint" style="margin-bottom:10px">Atualiza o OpenBase CLI e templates para a versão mais recente.</p>
     <div id="update-err" class="err"></div>
+    <div id="update-ok" class="ok"></div>
     <button id="update-btn" class="btn-primary" onclick="submitUpdate()" data-label="Update OpenBase CLI">Update OpenBase CLI</button>
   </div>
 
@@ -953,15 +991,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
     function err(ctx, msg) {
       var el = document.getElementById(ctx + '-err');
-      if (!el) return;
-      el.textContent = msg;
-      el.style.display = msg ? 'block' : 'none';
+      if (el) { el.textContent = msg; el.style.display = msg ? 'block' : 'none'; }
+      if (msg) { var ok = document.getElementById(ctx + '-ok'); if (ok) ok.style.display = 'none'; }
+    }
+    function ok(ctx, msg) {
+      var el = document.getElementById(ctx + '-ok');
+      if (el) { el.textContent = msg; el.style.display = msg ? 'block' : 'none'; }
+      if (msg) { var er = document.getElementById(ctx + '-err'); if (er) er.style.display = 'none'; }
     }
     function loading(ctx, on) {
       var btn = document.getElementById(ctx + '-btn');
       if (!btn) return;
       btn.disabled = on;
       btn.textContent = on ? 'Running…' : (btn.dataset.label || btn.textContent);
+      if (on) { ok(ctx, ''); err(ctx, ''); }
     }
 
     window.addEventListener('message', function(e) {
@@ -970,6 +1013,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         document.getElementById('new-folder').value = m.path;
       } else if (m.command === 'done') {
         loading(m.ctx, false);
+        if (m.text) ok(m.ctx, m.text);
       } else if (m.command === 'error') {
         loading(m.ctx, false);
         err(m.ctx, m.text);
@@ -1014,6 +1058,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         schema: document.getElementById('sc-schema').value.trim(),
         table: document.getElementById('sc-table').value.trim(),
         runMigrations: document.getElementById('sc-mig').checked,
+      }});
+    }
+
+    function submitScaffoldUpdate() {
+      var entity = document.getElementById('scu-entity').value.trim();
+      err('scu', '');
+      if (!entity) { err('scu', 'Entity name is required.'); return; }
+      if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('scu', 'Must be PascalCase (e.g. Product).'); return; }
+      loading('scu', true);
+      vscode.postMessage({ command: 'scaffoldUpdate', data: {
+        entity: entity,
+        schema: document.getElementById('scu-schema').value.trim(),
+        table: document.getElementById('scu-table').value.trim(),
+        runMigrations: document.getElementById('scu-mig').checked,
       }});
     }
 
