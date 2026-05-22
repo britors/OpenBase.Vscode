@@ -2118,11 +2118,19 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     else                   txt.placeholder = 'Request body...';
   }
 
+  var sendTimeoutId = null;
+  function clearSendTimeout() {
+    if (sendTimeoutId) { clearTimeout(sendTimeoutId); sendTimeoutId = null; }
+  }
+
   // ── send ───────────────────────────────────────────────────────────
   function sendRequest() {
     if (sending) return;
     var url = document.getElementById('url-input').value.trim();
-    if (!url) return;
+    if (!url) {
+      showError('Enter a URL before sending.');
+      return;
+    }
 
     var method = document.getElementById('method').value;
     var hdrs = collectHeaders();
@@ -2156,12 +2164,19 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     document.getElementById('res-headers-wrap').classList.add('hidden');
 
     vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, body: body });
+
+    sendTimeoutId = setTimeout(function() {
+      sending = false;
+      document.getElementById('send-btn').disabled = false;
+      showError('Extension did not respond after 30s. Check the URL and try again.');
+    }, 30000);
   }
 
   // ── messages ───────────────────────────────────────────────────────
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerSend') { sendRequest(); return; }
+    clearSendTimeout();
     sending = false;
     document.getElementById('send-btn').disabled = false;
     if (m.command === 'response') showResponse(m);
