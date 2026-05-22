@@ -639,7 +639,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             case 'build':        await this._build(msg.data as never, view);        break;
             case 'run':          await this._run(msg.data as never, view);          break;
             case 'stopRun':      this._runProcess?.kill(); break;
-            case 'update':       await this._exec('openbase update', await this._cwd() ?? process.cwd(), view, 'update', 'OpenBase: Update'); break;
+            case 'history':      await this._exec('openbase history', await this._cwd() ?? process.cwd(), view, 'history', 'OpenBase: History'); break;
+            case 'update':       await this._exec('openbase update',  await this._cwd() ?? process.cwd(), view, 'update',  'OpenBase: Update');  break;
         }
     }
 
@@ -846,7 +847,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div id="nav-ext"   class="nav-item hidden" data-page="ext"    onclick="nav(this,'ext')">Extension</div>
     <div id="nav-build" class="nav-item hidden" data-page="build"  onclick="nav(this,'build')">Build</div>
     <div id="nav-run"   class="nav-item hidden" data-page="run"    onclick="nav(this,'run')">Run</div>
-    <div id="nav-update" class="nav-item hidden" data-page="update" onclick="nav(this,'update')">Update CLI</div>
+    <div id="nav-update"  class="nav-item hidden" data-page="update"  onclick="nav(this,'update')">Update CLI</div>
+    <div id="nav-history" class="nav-item hidden" data-page="history" onclick="nav(this,'history')">History</div>
   </nav>
 
   <!-- NEW PROJECT -->
@@ -975,6 +977,13 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <button id="run-stop" class="btn-danger hidden" onclick="stopRun()">Stop</button>
   </div>
 
+  <!-- HISTORY -->
+  <div id="page-history" class="page">
+    <p class="hint" style="margin-bottom:10px">Exibe o histórico de gerações do projeto OpenBase.</p>
+    <div id="history-err" class="err"></div>
+    <button id="history-btn" class="btn-primary" onclick="submitHistory()" data-label="Show History">Show History</button>
+  </div>
+
   <!-- UPDATE -->
   <div id="page-update" class="page">
     <p class="hint" style="margin-bottom:10px">Atualiza o OpenBase CLI e templates para a versão mais recente.</p>
@@ -1046,7 +1055,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       btn.textContent = on ? 'Running…' : (btn.dataset.label || btn.textContent);
     }
 
-    var PROJECT_NAV_IDS = ['nav-sc','nav-sp','nav-pr','nav-ext','nav-build','nav-run','nav-update'];
+    var PROJECT_NAV_IDS = ['nav-sc','nav-sp','nav-pr','nav-ext','nav-build','nav-run','nav-update','nav-history'];
 
     function applyConfig(config) {
       var isProject = !!(config && config.createdBy === 'OpenBase CLI');
@@ -1185,6 +1194,12 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     }
 
     function stopRun() { vscode.postMessage({ command: 'stopRun' }); }
+
+    function submitHistory() {
+      err('history', '');
+      loading('history', true);
+      vscode.postMessage({ command: 'history' });
+    }
 
     function submitUpdate() {
       err('update', '');
