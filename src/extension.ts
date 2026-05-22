@@ -622,6 +622,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     static readonly viewType = 'openbase.panel';
     private _view?: vscode.WebviewView;
     private _runProcess?: import('child_process').ChildProcess;
+    private _channels = new Map<string, vscode.OutputChannel>();
+
+    private _channel(name: string): vscode.OutputChannel {
+        if (!this._channels.has(name)) {
+            this._channels.set(name, vscode.window.createOutputChannel(name));
+        }
+        return this._channels.get(name)!;
+    }
 
     resolveWebviewView(view: vscode.WebviewView): void {
         this._view = view;
@@ -631,16 +639,16 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     }
 
     private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
+        if (msg.command === 'pickFolder') {
+            const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
+            if (picked?.[0]) view.webview.postMessage({ command: 'folderPicked', path: picked[0].fsPath });
+            return;
+        }
         if (!await guardInstalled()) {
             view.webview.postMessage({ command: 'error', ctx: msg.data?.['ctx'] ?? '', text: 'OpenBase CLI not found.' });
             return;
         }
         switch (msg.command) {
-            case 'pickFolder': {
-                const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
-                if (picked?.[0]) view.webview.postMessage({ command: 'folderPicked', path: picked[0].fsPath });
-                break;
-            }
             case 'newProject':   await this._new(msg.data as never, view);          break;
             case 'scaffold':       await this._scaffold(msg.data as never, view);       break;
             case 'scaffoldUpdate': await this._scaffoldUpdate(msg.data as never, view); break;
@@ -846,21 +854,26 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     }
 
     private async _exec(cmd: string, cwd: string, view: vscode.WebviewView, ctx: string, channelName: string): Promise<boolean> {
-        const channel = vscode.window.createOutputChannel(channelName);
+        const channel = this._channel(channelName);
+        channel.clear();
         channel.show(true);
         const extraPath = dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         return new Promise<boolean>((resolve) => {
-            const child = exec(cmd, { cwd, env });
+            const child = exec(cmd, { cwd, env, timeout: 60000 });
             child.stdout?.on('data', (chunk: string) => channel.append(chunk));
             child.stderr?.on('data', (chunk: string) => channel.append(chunk));
-            child.on('close', (code) => {
-                if (code === 0) {
+            child.on('close', (code, signal) => {
+                if (signal === 'SIGTERM') {
+                    view.webview.postMessage({ command: 'error', ctx, text: 'Command timed out after 60s.' });
+                    resolve(false);
+                } else if (code === 0) {
                     view.webview.postMessage({ command: 'done', ctx, text: 'Completed successfully.' });
+                    resolve(true);
                 } else {
                     view.webview.postMessage({ command: 'error', ctx, text: `Command failed (exit ${code}). Check the output panel.` });
+                    resolve(false);
                 }
-                resolve(code === 0);
             });
             child.on('error', (err) => {
                 channel.appendLine(err.message);
