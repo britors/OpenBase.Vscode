@@ -1430,6 +1430,7 @@ function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: str
 }
 
 let sqlPanel: vscode.WebviewPanel | undefined;
+let sqlProcess: import('child_process').ChildProcess | undefined;
 
 async function sqlRunner(): Promise<void> {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -1445,6 +1446,13 @@ async function sqlRunner(): Promise<void> {
     sqlPanel.webview.html = buildSqlRunnerHtml(conn);
 
     sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string }) => {
+        if (msg.command === 'cancel') {
+            sqlProcess?.kill();
+            sqlProcess = undefined;
+            sqlPanel?.webview.postMessage({ command: 'cancelled' });
+            return;
+        }
+
         if (msg.command === 'saveCsv') {
             const uri = await vscode.window.showSaveDialog({
                 defaultUri: vscode.Uri.file(path.join(cwd ?? os.homedir(), msg.csvName ?? 'query.csv')),
@@ -1501,10 +1509,12 @@ async function sqlRunner(): Promise<void> {
             }
 
             const output = await new Promise<string>((resolve, reject) => {
-                exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
+                const child = exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
+                    sqlProcess = undefined;
                     if (err && !stdout) reject(new Error(stderr || err.message));
                     else resolve(stdout + (stderr ? '\n' + stderr : ''));
                 });
+                sqlProcess = child;
             });
 
             const result = parseSqlOutput(output, conn.type);
@@ -1519,7 +1529,8 @@ async function sqlRunner(): Promise<void> {
 }
 
 function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
-    const connLabel = conn?.label ?? 'No connection';
+    const connLabel = (conn?.label ?? 'No connection')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1546,6 +1557,9 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   .btn-primary:disabled{opacity:.5;cursor:not-allowed}
   .btn-secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
   .btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}
+  .btn-cancel{background:var(--vscode-statusBarItem-errorBackground,#c72e0f);color:#fff}
+  .btn-cancel:hover{opacity:.85}
+  .hidden{display:none!important}
   .hint{font-size:11px;color:var(--vscode-descriptionForeground)}
   .status{margin-left:auto;font-size:11px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;gap:5px}
   .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
@@ -1574,6 +1588,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
 </div>
 <div class="toolbar">
   <button id="run-btn" class="btn btn-primary">▶ Run</button>
+  <button id="cancel-btn" class="btn btn-cancel hidden">✕ Cancel</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
@@ -1587,6 +1602,12 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   let lastColumns = [], lastRows = [];
 
   document.getElementById('run-btn').addEventListener('click', run);
+  document.getElementById('cancel-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'cancel' });
+  });
+  document.getElementById('results').addEventListener('click', function(e) {
+    if (e.target && e.target.id === 'export-csv-btn') exportCsv();
+  });
 
   document.getElementById('sql').addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); run(); return; }
@@ -1626,20 +1647,30 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
     var m = e.data;
     if (m.command === 'running') {
       running = true; t0 = Date.now();
-      document.getElementById('run-btn').disabled = true;
+      document.getElementById('run-btn').classList.add('hidden');
+      document.getElementById('cancel-btn').classList.remove('hidden');
       document.getElementById('results').innerHTML = '';
       setStatus('<span class="spinner"></span> Running…');
     } else if (m.command === 'result') {
       running = false;
-      document.getElementById('run-btn').disabled = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
       var elapsed = ((Date.now() - t0) / 1000).toFixed(2) + 's';
       renderResult(m.columns, m.rows, m.message, elapsed);
     } else if (m.command === 'error') {
       running = false;
-      document.getElementById('run-btn').disabled = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
       setStatus('');
       lastColumns = []; lastRows = [];
       document.getElementById('results').innerHTML = '<div class="err-box">' + esc(m.text) + '</div>';
+    } else if (m.command === 'cancelled') {
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML = '<div class="msg-box">Query cancelled.</div>';
     }
   });
 
@@ -1659,7 +1690,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
     var infoMsg  = message ? ' · ' + esc(message) : '';
     var hdr  = '<div class="result-header">'
              + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' · ' + elapsed + infoMsg + '</span>'
-             + '<button class="btn btn-secondary" onclick="exportCsv()" style="font-size:11px;padding:2px 8px">Export CSV</button>'
+             + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
              + '</div>';
 
     var tbl = '<table><thead><tr>';
@@ -1669,7 +1700,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
       tbl += '<tr>';
       for (var c = 0; c < columns.length; c++) {
         var val = (rows[r] && rows[r][c] != null) ? rows[r][c] : '';
-        var isNull = val === '' || val === 'NULL';
+        var isNull = val === 'NULL';
         tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '">'
              + (isNull ? 'NULL' : esc(val)) + '</td>';
       }
