@@ -1,4 +1,4 @@
-# OpenBase CLI — VS Code Extension
+# OpenBase - Ferramentas de Produtividade
 
 ![OpenBase for VS Code](https://raw.githubusercontent.com/britors/OpenBase.Vscode/main/banner.png)
 
