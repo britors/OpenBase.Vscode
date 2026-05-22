@@ -727,10 +727,11 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     .field{margin-bottom:10px}
     label{display:block;margin-bottom:3px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--vscode-descriptionForeground)}
     .check-label{display:flex;align-items:center;gap:6px;font-size:12px;text-transform:none;letter-spacing:normal;font-weight:normal;color:var(--vscode-foreground);cursor:pointer}
-    input,select{width:100%;padding:4px 7px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);font-family:inherit;font-size:inherit;outline:none}
+    input,select,textarea{width:100%;padding:4px 7px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);font-family:inherit;font-size:inherit;outline:none}
+    textarea{resize:vertical}
     input[type=checkbox]{width:auto}
-    input:focus,select:focus{border-color:var(--vscode-focusBorder)}
-    input::placeholder{color:var(--vscode-input-placeholderForeground)}
+    input:focus,select:focus,textarea:focus{border-color:var(--vscode-focusBorder)}
+    input::placeholder,textarea::placeholder{color:var(--vscode-input-placeholderForeground)}
     .row{display:flex;gap:6px}
     .row input{flex:1;min-width:0}
     hr{border:none;border-top:1px solid var(--vscode-panel-border);margin:10px 0}
@@ -818,7 +819,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         <option value="httpcall">httpcall — External HTTP call</option>
       </select>
     </div>
-    <div id="sp-sql-field" class="field"><label>SQL *</label><input id="sp-sql" type="text" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></div>
+    <div id="sp-sql-field" class="field"><label>SQL *</label><textarea id="sp-sql" rows="5" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></textarea></div>
     <hr>
     <div class="field">
       <label>Parameters</label>
