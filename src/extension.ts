@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
-import * as fs from 'fs';
 import { execSync, exec } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
@@ -77,77 +76,7 @@ async function guardInstalled(): Promise<boolean> {
     return false;
 }
 
-// ─── openbase project detection ─────────────────────────────────────────────
-
-interface OpenBaseConfig {
-    createdBy: string;
-    template: string;   // e.g. "api:sqlserver"
-    version: string;
-    createdAt: string;
-}
-
-let openBaseConfig: OpenBaseConfig | null = null;
 let panelProvider: OpenBasePanelProvider | undefined;
-
-function isVersionOlder(a: string, b: string): boolean {
-    const pa = a.split('.').map(Number);
-    const pb = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const na = pa[i] ?? 0;
-        const nb = pb[i] ?? 0;
-        if (na < nb) return true;
-        if (na > nb) return false;
-    }
-    return false;
-}
-
-async function loadAndApplyConfig(): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    let config: OpenBaseConfig | null = null;
-
-    if (folder) {
-        const configPath = path.join(folder.uri.fsPath, '.openbase.json');
-        try {
-            const raw = fs.readFileSync(configPath, 'utf-8');
-            const parsed = JSON.parse(raw) as OpenBaseConfig;
-            if (parsed.createdBy === 'OpenBase CLI') config = parsed;
-        } catch {
-            // file missing or malformed — not an OpenBase project
-        }
-    }
-
-    openBaseConfig = config;
-    await vscode.commands.executeCommand('setContext', 'openbase.isOpenBaseProject', config !== null);
-    panelProvider?.updateConfig();
-
-    if (config) void checkVersionMismatch(config);
-}
-
-async function checkVersionMismatch(config: OpenBaseConfig): Promise<void> {
-    if (!isOpenBaseInstalled()) return;
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    try {
-        const cliVersion = execSync('openbase version show', { encoding: 'utf-8', env }).trim();
-        if (!isVersionOlder(config.version, cliVersion)) return;
-        const action = await vscode.window.showWarningMessage(
-            `This project was created with OpenBase CLI v${config.version}, but v${cliVersion} is installed. Run "openbase update" to upgrade the project files.`,
-            'Run Update'
-        );
-        if (action === 'Run Update') {
-            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-            openTerminal('Update', cwd, 'openbase update');
-        }
-    } catch {
-        // CLI version check failed, ignore
-    }
-}
-
-async function guardOpenBaseProject(): Promise<boolean> {
-    if (openBaseConfig) return true;
-    vscode.window.showWarningMessage('No OpenBase project detected in this workspace. Open an OpenBase project folder to use this command.');
-    return false;
-}
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
@@ -271,7 +200,6 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
 
 async function scaffold(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const entity = await vscode.window.showInputBox({
         title: 'OpenBase: Scaffold',
@@ -292,7 +220,6 @@ async function scaffold(uri?: vscode.Uri): Promise<void> {
 
 async function scaffoldUpdate(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const entity = await vscode.window.showInputBox({
         title: 'OpenBase: Scaffold Update',
@@ -315,7 +242,6 @@ async function scaffoldUpdate(uri?: vscode.Uri): Promise<void> {
 
 async function specialist(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const entity = await vscode.window.showInputBox({
         title: 'OpenBase: Specialist (1/4) — Entity',
@@ -427,7 +353,6 @@ async function specialist(uri?: vscode.Uri): Promise<void> {
 
 async function procedure(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const name = await vscode.window.showInputBox({
         title: 'OpenBase: Procedure',
@@ -458,7 +383,6 @@ async function procedure(uri?: vscode.Uri): Promise<void> {
 
 async function extensionAdd(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const ext = await vscode.window.showQuickPick(
         EXTENSIONS.map((e): vscode.QuickPickItem => ({
@@ -490,7 +414,6 @@ async function extensionAdd(uri?: vscode.Uri): Promise<void> {
 
 async function extensionList(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
@@ -502,7 +425,6 @@ async function extensionList(uri?: vscode.Uri): Promise<void> {
 
 async function build(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const config = await vscode.window.showQuickPick(
         BUILD_CONFIGS.map((c): vscode.QuickPickItem => ({ label: c })),
@@ -528,7 +450,6 @@ async function build(uri?: vscode.Uri): Promise<void> {
 
 async function run(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
 
     const config = await vscode.window.showQuickPick(
         BUILD_CONFIGS.map((c): vscode.QuickPickItem => ({ label: c })),
@@ -554,14 +475,12 @@ async function run(uri?: vscode.Uri): Promise<void> {
 
 async function update(): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     openTerminal('Update', cwd, 'openbase update');
 }
 
 async function history(): Promise<void> {
     if (!await guardInstalled()) return;
-    if (!await guardOpenBaseProject()) return;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     openTerminal('History', cwd, 'openbase history');
 }
@@ -609,15 +528,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         view.webview.options = { enableScripts: true };
         view.webview.html = this._html();
         view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
-        this._sendConfig();
-    }
-
-    updateConfig(): void {
-        this._sendConfig();
-    }
-
-    private _sendConfig(): void {
-        this._view?.webview.postMessage({ command: 'configLoaded', config: openBaseConfig });
     }
 
     private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
@@ -834,21 +744,19 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     .hidden{display:none!important}
     .err{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);display:none}
     .hint{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:6px}
-    #project-banner{display:none;padding:4px 12px;font-size:11px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);border-bottom:1px solid var(--vscode-panel-border)}
   </style>
 </head>
 <body>
-  <div id="project-banner"></div>
   <nav>
-    <div class="nav-item active"              data-page="new"    onclick="nav(this,'new')">New Project</div>
-    <div id="nav-sc"    class="nav-item hidden" data-page="sc"     onclick="nav(this,'sc')">Scaffold</div>
-    <div id="nav-sp"    class="nav-item hidden" data-page="sp"     onclick="nav(this,'sp')">Specialist</div>
-    <div id="nav-pr"    class="nav-item hidden" data-page="pr"     onclick="nav(this,'pr')">Procedure</div>
-    <div id="nav-ext"   class="nav-item hidden" data-page="ext"    onclick="nav(this,'ext')">Extension</div>
-    <div id="nav-build" class="nav-item hidden" data-page="build"  onclick="nav(this,'build')">Build</div>
-    <div id="nav-run"   class="nav-item hidden" data-page="run"    onclick="nav(this,'run')">Run</div>
-    <div id="nav-update"  class="nav-item hidden" data-page="update"  onclick="nav(this,'update')">Update CLI</div>
-    <div id="nav-history" class="nav-item hidden" data-page="history" onclick="nav(this,'history')">History</div>
+    <div class="nav-item active" data-page="new"     onclick="nav(this,'new')">New Project</div>
+    <div class="nav-item"        data-page="sc"      onclick="nav(this,'sc')">Scaffold</div>
+    <div class="nav-item"        data-page="sp"      onclick="nav(this,'sp')">Specialist</div>
+    <div class="nav-item"        data-page="pr"      onclick="nav(this,'pr')">Procedure</div>
+    <div class="nav-item"        data-page="ext"     onclick="nav(this,'ext')">Extension</div>
+    <div class="nav-item"        data-page="build"   onclick="nav(this,'build')">Build</div>
+    <div class="nav-item"        data-page="run"     onclick="nav(this,'run')">Run</div>
+    <div class="nav-item"        data-page="update"  onclick="nav(this,'update')">Update CLI</div>
+    <div class="nav-item"        data-page="history" onclick="nav(this,'history')">History</div>
   </nav>
 
   <!-- NEW PROJECT -->
@@ -1055,36 +963,10 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       btn.textContent = on ? 'Running…' : (btn.dataset.label || btn.textContent);
     }
 
-    var PROJECT_NAV_IDS = ['nav-sc','nav-sp','nav-pr','nav-ext','nav-build','nav-run','nav-update','nav-history'];
-
-    function applyConfig(config) {
-      var isProject = !!(config && config.createdBy === 'OpenBase CLI');
-      PROJECT_NAV_IDS.forEach(function(id) {
-        var el = document.getElementById(id);
-        if (el) el.classList.toggle('hidden', !isProject);
-      });
-      if (!isProject) {
-        var active = document.querySelector('.nav-item.active');
-        if (active && active.id && PROJECT_NAV_IDS.indexOf(active.id) !== -1) {
-          nav(document.querySelector('[data-page="new"]'), 'new');
-        }
-      }
-      var banner = document.getElementById('project-banner');
-      if (!banner) return;
-      if (!isProject) { banner.style.display = 'none'; return; }
-      var db = config.template.replace('api:', '').toUpperCase();
-      var d = new Date(config.createdAt);
-      var dateStr = d.toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric' });
-      banner.textContent = db + ' · CLI v' + config.version + ' · ' + dateStr;
-      banner.style.display = 'block';
-    }
-
     window.addEventListener('message', function(e) {
       var m = e.data;
       if (m.command === 'folderPicked') {
         document.getElementById('new-folder').value = m.path;
-      } else if (m.command === 'configLoaded') {
-        applyConfig(m.config);
       } else if (m.command === 'done') {
         loading(m.ctx, false);
       } else if (m.command === 'error') {
@@ -1234,17 +1116,6 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.update',         update),
         reg('openbase.history',        history),
         reg('openbase.version',        version),
-    );
-
-    void loadAndApplyConfig();
-
-    const watcher = vscode.workspace.createFileSystemWatcher('**/.openbase.json');
-    watcher.onDidCreate(() => void loadAndApplyConfig());
-    watcher.onDidChange(() => void loadAndApplyConfig());
-    watcher.onDidDelete(() => void loadAndApplyConfig());
-    context.subscriptions.push(
-        watcher,
-        vscode.workspace.onDidChangeWorkspaceFolders(() => void loadAndApplyConfig()),
     );
 }
 
