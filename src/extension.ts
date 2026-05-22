@@ -1812,7 +1812,7 @@ async function httpRunner(): Promise<void> {
 }
 
 function buildHttpRunnerHtml(baseUrl: string): string {
-    const safeBase = baseUrl.replace(/'/g, "\\'");
+    const safeBase = JSON.stringify(baseUrl);
     return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1958,7 +1958,7 @@ function buildHttpRunnerHtml(baseUrl: string): string {
 <script>
   const vscode = acquireVsCodeApi();
   let sending = false;
-  const BASE_URL = '${safeBase}';
+  const BASE_URL = ${safeBase};
 
   // init
   if (BASE_URL) document.getElementById('url-input').value = BASE_URL + '/api/';
@@ -1973,8 +1973,20 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
   });
 
+  var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
+
   function onMethodChange(sel) {
     sel.className = 'm-' + sel.value;
+    var noBody = NO_BODY_METHODS.indexOf(sel.value) !== -1;
+    document.querySelectorAll('.req-section .tab').forEach(function(t) {
+      if (t.textContent === 'Body') t.style.opacity = noBody ? '.35' : '';
+    });
+    if (noBody) {
+      var bodyTab = document.querySelector('.req-section .tab.active');
+      if (bodyTab && bodyTab.textContent === 'Body') {
+        reqTab(document.querySelector('.req-section .tab'), 'headers');
+      }
+    }
   }
   onMethodChange(document.getElementById('method'));
 
@@ -2041,9 +2053,17 @@ function buildHttpRunnerHtml(baseUrl: string): string {
 
     var bodyType = document.getElementById('body-type').value;
     var body = undefined;
-    if (bodyType !== 'none') {
+    if (bodyType !== 'none' && NO_BODY_METHODS.indexOf(method) === -1) {
       body = document.getElementById('body-text').value;
-      if (bodyType === 'json' && !hdrs['Content-Type'])   hdrs['Content-Type'] = 'application/json';
+      if (bodyType === 'json') {
+        if (!hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
+        if (body) {
+          try { JSON.parse(body); } catch {
+            showError('Invalid JSON body — fix the syntax before sending.');
+            return;
+          }
+        }
+      }
       if (bodyType === 'form') hdrs['Content-Type'] = 'application/x-www-form-urlencoded';
     }
 
@@ -2068,14 +2088,26 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     else if (m.command === 'error') showError(m.text);
   });
 
+  var lastRawBody = '';
+
+  function copyBody() {
+    if (!lastRawBody) return;
+    navigator.clipboard.writeText(lastRawBody).then(function() {
+      var btn = document.getElementById('copy-btn');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy'; }, 1500); }
+    });
+  }
+
   function showResponse(m) {
+    lastRawBody = m.body || '';
     var cls = m.status >= 500 ? 's5xx' : m.status >= 400 ? 's4xx' : m.status >= 300 ? 's3xx' : 's2xx';
     var size = m.size >= 1024 ? (m.size / 1024).toFixed(1) + ' KB' : m.size + ' B';
     document.getElementById('res-bar').innerHTML =
       '<span class="status-badge ' + cls + '">' + m.status + ' ' + esc(m.statusText) + '</span>' +
       '<span class="meta">' + m.time + ' ms</span>' +
       '<span class="meta">·</span>' +
-      '<span class="meta">' + size + '</span>';
+      '<span class="meta">' + size + '</span>' +
+      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px" onclick="copyBody()">Copy</button>';
     document.getElementById('res-tab-strip').classList.remove('hidden');
 
     // body
