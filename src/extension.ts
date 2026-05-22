@@ -156,8 +156,8 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     if (dbName.trim())             args.push(`--db-name "${dbName.trim()}"`);
     if (dbUser.trim())             args.push(`--db-user "${dbUser.trim()}"`);
     if (dbPassword.trim())         args.push(`--db-password "${dbPassword.trim()}"`);
-    if (mediatrLicense.trim())     args.push(`--mediatr-license "${mediatrLicense.trim()}"`);
-    if (automapperLicense.trim())  args.push(`--automapper-license "${automapperLicense.trim()}"`);
+    args.push(`--mediatr-license "${mediatrLicense.trim()}"`);
+    args.push(`--automapper-license "${automapperLicense.trim()}"`);
 
     const channel = vscode.window.createOutputChannel('OpenBase: New Project');
     channel.show(true);
@@ -427,93 +427,174 @@ function extensionLabel(e: string): string {
 
 class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     static readonly viewType = 'openbase.panel';
+    private _runProcess?: import('child_process').ChildProcess;
 
     resolveWebviewView(view: vscode.WebviewView): void {
         view.webview.options = { enableScripts: true };
         view.webview.html = this._html();
-
-        view.webview.onDidReceiveMessage(async (msg) => {
-            if (msg.command === 'pickFolder') {
-                const picked = await vscode.window.showOpenDialog({
-                    canSelectFiles: false,
-                    canSelectFolders: true,
-                    canSelectMany: false,
-                    openLabel: 'Select project folder',
-                });
-                if (picked?.[0]) {
-                    view.webview.postMessage({ command: 'folderPicked', path: picked[0].fsPath });
-                }
-            } else if (msg.command === 'newProject') {
-                await this._create(msg.data, view);
-            }
-        });
+        view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
     }
 
-    private async _create(data: {
-        name: string; template: string; dbServer: string; dbName: string;
-        dbUser: string; dbPassword: string; mediatrLicense: string;
-        automapperLicense: string; folder: string;
-    }, view: vscode.WebviewView): Promise<void> {
+    private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
         if (!await guardInstalled()) {
-            view.webview.postMessage({ command: 'error', text: 'OpenBase CLI not found.' });
+            view.webview.postMessage({ command: 'error', ctx: msg.data?.['ctx'] ?? '', text: 'OpenBase CLI not found.' });
             return;
         }
+        switch (msg.command) {
+            case 'pickFolder': {
+                const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
+                if (picked?.[0]) view.webview.postMessage({ command: 'folderPicked', path: picked[0].fsPath });
+                break;
+            }
+            case 'newProject':   await this._new(msg.data as never, view);          break;
+            case 'scaffold':     await this._scaffold(msg.data as never, view);     break;
+            case 'procedure':    await this._procedure(msg.data as never, view);    break;
+            case 'extensionAdd': await this._extensionAdd(msg.data as never, view); break;
+            case 'build':        await this._build(msg.data as never, view);        break;
+            case 'run':          await this._run(msg.data as never, view);          break;
+            case 'stopRun':      this._runProcess?.kill(); break;
+            case 'update':       await this._exec('openbase update', await this._cwd() ?? process.cwd(), view, 'update', 'OpenBase: Update'); break;
+        }
+    }
 
-        let cwd = data.folder;
+    // ── per-command handlers ────────────────────────────────────────────────
+
+    private async _new(d: { name: string; template: string; dbServer: string; dbName: string; dbUser: string; dbPassword: string; mediatrLicense: string; automapperLicense: string; folder: string }, view: vscode.WebviewView): Promise<void> {
+        let cwd = d.folder;
         if (!cwd) {
             const folders = vscode.workspace.workspaceFolders;
             if (folders?.length === 1) {
                 cwd = folders[0].uri.fsPath;
             } else {
-                const picked = await vscode.window.showOpenDialog({
-                    canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
-                    openLabel: 'Select project folder',
-                });
-                if (!picked?.[0]) { view.webview.postMessage({ command: 'done' }); return; }
+                const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select project folder' });
+                if (!picked?.[0]) { view.webview.postMessage({ command: 'done', ctx: 'new' }); return; }
                 cwd = picked[0].fsPath;
             }
         }
+        const args = [`-n ${d.name}`, `-s ${d.template}`];
+        if (d.dbServer)   args.push(`--db-server "${d.dbServer}"`);
+        if (d.dbName)     args.push(`--db-name "${d.dbName}"`);
+        if (d.dbUser)     args.push(`--db-user "${d.dbUser}"`);
+        if (d.dbPassword) args.push(`--db-password "${d.dbPassword}"`);
+        args.push(`--mediatr-license "${d.mediatrLicense}"`);
+        args.push(`--automapper-license "${d.automapperLicense}"`);
 
-        const args: string[] = [`-n ${data.name}`, `-s ${data.template}`];
-        if (data.dbServer)          args.push(`--db-server "${data.dbServer}"`);
-        if (data.dbName)            args.push(`--db-name "${data.dbName}"`);
-        if (data.dbUser)            args.push(`--db-user "${data.dbUser}"`);
-        if (data.dbPassword)        args.push(`--db-password "${data.dbPassword}"`);
-        if (data.mediatrLicense)    args.push(`--mediatr-license "${data.mediatrLicense}"`);
-        if (data.automapperLicense) args.push(`--automapper-license "${data.automapperLicense}"`);
+        const ok = await this._exec(`openbase new ${args.join(' ')}`, cwd, view, 'new', 'OpenBase: New Project');
+        if (!ok) return;
 
-        const channel = vscode.window.createOutputChannel('OpenBase: New Project');
+        const projectUri = vscode.Uri.file(path.join(cwd, d.name));
+        const action = await vscode.window.showInformationMessage(`Project "${d.name}" created successfully!`, 'Open Folder', 'Open in New Window');
+        if (action === 'Open Folder')      vscode.commands.executeCommand('vscode.openFolder', projectUri, false);
+        else if (action === 'Open in New Window') vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
+    }
+
+    private async _scaffold(d: { entity: string; mode: string; schema: string; table: string; runMigrations: boolean }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
+
+        if (d.mode === 'codefirst') {
+            openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
+            view.webview.postMessage({ command: 'done', ctx: 'sc' });
+            return;
+        }
+        const args = [`-e ${d.entity}`, '--mode modelfirst'];
+        if (d.schema)         args.push(`--schema "${d.schema}"`);
+        if (d.table)          args.push(`--table "${d.table}"`);
+        if (d.runMigrations)  args.push('--run-migrations');
+        await this._exec(`openbase scaffold ${args.join(' ')}`, cwd, view, 'sc', 'OpenBase: Scaffold');
+    }
+
+    private async _procedure(d: { name: string; schema: string }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'pr' }); return; }
+
+        if (!d.name) {
+            openTerminal('Procedure', cwd, 'openbase procedure');
+            view.webview.postMessage({ command: 'done', ctx: 'pr' });
+            return;
+        }
+        const args = [`-n ${d.name}`];
+        if (d.schema) args.push(`-s "${d.schema}"`);
+        await this._exec(`openbase procedure ${args.join(' ')}`, cwd, view, 'pr', 'OpenBase: Procedure');
+    }
+
+    private async _extensionAdd(d: { name: string; provider: string }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'ext' }); return; }
+        const args = d.provider ? `${d.name} -p ${d.provider}` : d.name;
+        await this._exec(`openbase extension add ${args}`, cwd, view, 'ext', 'OpenBase: Extension');
+    }
+
+    private async _build(d: { configuration: string; noRestore: boolean }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'build' }); return; }
+        const flags = d.noRestore ? ' --no-restore' : '';
+        await this._exec(`openbase build -c ${d.configuration}${flags}`, cwd, view, 'build', 'OpenBase: Build');
+    }
+
+    private async _run(d: { configuration: string; noBuild: boolean }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'run' }); return; }
+
+        const flags = d.noBuild ? ' --no-build' : '';
+        const channel = vscode.window.createOutputChannel('OpenBase: Run');
         channel.show(true);
 
         const extraPath = dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
-        const success = await new Promise<boolean>((resolve) => {
-            const child = exec(`openbase new ${args.join(' ')}`, { cwd, env });
-            child.stdout?.on('data', (d: string) => channel.append(d));
-            child.stderr?.on('data', (d: string) => channel.append(d));
-            child.on('close', (code) => resolve(code === 0));
-            child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
+        this._runProcess = exec(`openbase run -c ${d.configuration}${flags}`, { cwd, env });
+        this._runProcess.stdout?.on('data', (chunk: string) => channel.append(chunk));
+        this._runProcess.stderr?.on('data', (chunk: string) => channel.append(chunk));
+        view.webview.postMessage({ command: 'runStarted' });
+
+        this._runProcess.on('close', () => {
+            this._runProcess = undefined;
+            view.webview.postMessage({ command: 'runStopped' });
         });
-
-        view.webview.postMessage({ command: 'done' });
-
-        if (!success) {
-            view.webview.postMessage({ command: 'error', text: `Failed to create "${data.name}". Check the output panel.` });
-            return;
-        }
-
-        const projectUri = vscode.Uri.file(path.join(cwd, data.name));
-        const action = await vscode.window.showInformationMessage(
-            `Project "${data.name}" created successfully!`,
-            'Open Folder', 'Open in New Window'
-        );
-        if (action === 'Open Folder') {
-            vscode.commands.executeCommand('vscode.openFolder', projectUri, false);
-        } else if (action === 'Open in New Window') {
-            vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
-        }
+        this._runProcess.on('error', (err) => {
+            channel.appendLine(err.message);
+            this._runProcess = undefined;
+            view.webview.postMessage({ command: 'runStopped' });
+            view.webview.postMessage({ command: 'error', ctx: 'run', text: err.message });
+        });
     }
+
+    // ── shared helpers ──────────────────────────────────────────────────────
+
+    private async _cwd(): Promise<string | undefined> {
+        const folders = vscode.workspace.workspaceFolders;
+        if (folders?.length === 1) return folders[0].uri.fsPath;
+        const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select project folder' });
+        return picked?.[0]?.fsPath;
+    }
+
+    private async _exec(cmd: string, cwd: string, view: vscode.WebviewView, ctx: string, channelName: string): Promise<boolean> {
+        const channel = vscode.window.createOutputChannel(channelName);
+        channel.show(true);
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        return new Promise<boolean>((resolve) => {
+            const child = exec(cmd, { cwd, env });
+            child.stdout?.on('data', (chunk: string) => channel.append(chunk));
+            child.stderr?.on('data', (chunk: string) => channel.append(chunk));
+            child.on('close', (code) => {
+                if (code === 0) {
+                    view.webview.postMessage({ command: 'done', ctx });
+                } else {
+                    view.webview.postMessage({ command: 'error', ctx, text: `Command failed (exit ${code}). Check the output panel.` });
+                }
+                resolve(code === 0);
+            });
+            child.on('error', (err) => {
+                channel.appendLine(err.message);
+                view.webview.postMessage({ command: 'error', ctx, text: err.message });
+                resolve(false);
+            });
+        });
+    }
+
+    // ── html ────────────────────────────────────────────────────────────────
 
     private _html(): string {
         return /* html */`<!DOCTYPE html>
@@ -523,127 +604,285 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{padding:0 12px 16px;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground)}
+    body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground)}
+    nav{border-bottom:1px solid var(--vscode-panel-border);margin-bottom:0}
+    .nav-item{padding:5px 12px;cursor:pointer;font-size:12px;border-left:2px solid transparent}
+    .nav-item:hover{background:var(--vscode-list-hoverBackground)}
+    .nav-item.active{border-left-color:var(--vscode-focusBorder);color:var(--vscode-textLink-activeForeground);background:var(--vscode-list-activeSelectionBackground)}
+    .page{display:none;padding:12px}
+    .page.active{display:block}
     .field{margin-bottom:10px}
     label{display:block;margin-bottom:3px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--vscode-descriptionForeground)}
+    .check-label{display:flex;align-items:center;gap:6px;font-size:12px;text-transform:none;letter-spacing:normal;font-weight:normal;color:var(--vscode-foreground);cursor:pointer}
     input,select{width:100%;padding:4px 7px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);font-family:inherit;font-size:inherit;outline:none}
+    input[type=checkbox]{width:auto}
     input:focus,select:focus{border-color:var(--vscode-focusBorder)}
     input::placeholder{color:var(--vscode-input-placeholderForeground)}
     .row{display:flex;gap:6px}
     .row input{flex:1;min-width:0}
+    hr{border:none;border-top:1px solid var(--vscode-panel-border);margin:10px 0}
     .btn{padding:4px 8px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
-    .btn-secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
-    .btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}
+    .btn-sm{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
+    .btn-sm:hover{background:var(--vscode-button-secondaryHoverBackground)}
     .btn-primary{width:100%;padding:6px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);margin-top:6px}
     .btn-primary:hover{background:var(--vscode-button-hoverBackground)}
     .btn-primary:disabled{opacity:.5;cursor:not-allowed}
-    hr{border:none;border-top:1px solid var(--vscode-panel-border);margin:12px 0}
-    .error{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);display:none}
+    .btn-danger{width:100%;padding:6px;background:var(--vscode-statusBarItem-errorBackground,#c72e0f);color:#fff;margin-top:6px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
+    .hidden{display:none!important}
+    .err{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);display:none}
+    .hint{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:6px}
   </style>
 </head>
 <body>
-  <div class="field">
-    <label>Project name *</label>
-    <input id="name" type="text" placeholder="MyProject">
-  </div>
-  <div class="field">
-    <label>Database</label>
-    <select id="template">
-      <option value="sqlserver">SQL Server</option>
-      <option value="pgsql">PostgreSQL</option>
-      <option value="oracle">Oracle</option>
-    </select>
-  </div>
-  <hr>
-  <div class="field">
-    <label>DB Server</label>
-    <input id="dbServer" type="text" placeholder=".">
-  </div>
-  <div class="field">
-    <label>DB Name</label>
-    <input id="dbName" type="text" placeholder="(same as project name)">
-  </div>
-  <div class="field">
-    <label>DB User</label>
-    <input id="dbUser" type="text" placeholder="Windows Auth / postgres">
-  </div>
-  <div class="field">
-    <label>DB Password</label>
-    <input id="dbPassword" type="password">
-  </div>
-  <hr>
-  <div class="field">
-    <label>MediatR License</label>
-    <input id="mediatrLicense" type="text" placeholder="(optional)">
-  </div>
-  <div class="field">
-    <label>AutoMapper License</label>
-    <input id="automapperLicense" type="text" placeholder="(optional)">
-  </div>
-  <hr>
-  <div class="field">
-    <label>Destination folder</label>
-    <div class="row">
-      <input id="folder" type="text" placeholder="(workspace folder)" readonly>
-      <button class="btn btn-secondary" onclick="pickFolder()">Browse</button>
+  <nav>
+    <div class="nav-item active" data-page="new"    onclick="nav(this,'new')">New Project</div>
+    <div class="nav-item"        data-page="sc"     onclick="nav(this,'sc')">Scaffold</div>
+    <div class="nav-item"        data-page="pr"     onclick="nav(this,'pr')">Procedure</div>
+    <div class="nav-item"        data-page="ext"    onclick="nav(this,'ext')">Extension</div>
+    <div class="nav-item"        data-page="build"  onclick="nav(this,'build')">Build</div>
+    <div class="nav-item"        data-page="run"    onclick="nav(this,'run')">Run</div>
+    <div class="nav-item"        data-page="update" onclick="nav(this,'update')">Update CLI</div>
+  </nav>
+
+  <!-- NEW PROJECT -->
+  <div id="page-new" class="page active">
+    <div class="field"><label>Project name *</label><input id="new-name" type="text" placeholder="MyProject"></div>
+    <div class="field"><label>Database</label>
+      <select id="new-tpl" onchange="onTplChange()">
+        <option value="sqlserver">SQL Server</option>
+        <option value="pgsql">PostgreSQL</option>
+        <option value="oracle">Oracle</option>
+      </select>
     </div>
+    <hr>
+    <div class="field"><label>DB Server</label><input id="new-srv" type="text" placeholder="."></div>
+    <div class="field"><label>DB Name</label><input id="new-db" type="text" placeholder="(same as project name)"></div>
+    <div class="field"><label>DB User</label><input id="new-usr" type="text" placeholder="Windows Auth / postgres"></div>
+    <div class="field"><label>DB Password</label><input id="new-pwd" type="password"></div>
+    <hr>
+    <div class="field"><label>MediatR License</label><input id="new-mediatR" type="text" placeholder="(optional)"></div>
+    <div class="field"><label>AutoMapper License</label><input id="new-automapper" type="text" placeholder="(optional)"></div>
+    <hr>
+    <div class="field"><label>Destination folder</label>
+      <div class="row">
+        <input id="new-folder" type="text" placeholder="(workspace folder)" readonly>
+        <button class="btn btn-sm" onclick="pickFolder()">Browse</button>
+      </div>
+    </div>
+    <div id="new-err" class="err"></div>
+    <button id="new-btn" class="btn-primary" onclick="submitNew()" data-label="Create Project">Create Project</button>
   </div>
-  <div id="err" class="error"></div>
-  <button id="btnCreate" class="btn btn-primary" onclick="create()">Create Project</button>
+
+  <!-- SCAFFOLD -->
+  <div id="page-sc" class="page">
+    <div class="field"><label>Entity *</label><input id="sc-entity" type="text" placeholder="Product"></div>
+    <div class="field"><label>Mode</label>
+      <select id="sc-mode" onchange="onScMode()">
+        <option value="modelfirst">Model First — reads from DB</option>
+        <option value="codefirst">Code First — interactive terminal</option>
+      </select>
+    </div>
+    <div id="sc-mf">
+      <div class="field"><label>Schema</label><input id="sc-schema" type="text" placeholder="dbo"></div>
+      <div class="field"><label>Table</label><input id="sc-table" type="text" placeholder="(auto-detect from entity name)"></div>
+      <div class="field"><label class="check-label"><input id="sc-mig" type="checkbox"> Run migrations after scaffold</label></div>
+    </div>
+    <p id="sc-cf-hint" class="hint hidden">Um terminal será aberto para a coleta interativa de propriedades.</p>
+    <div id="sc-err" class="err"></div>
+    <button id="sc-btn" class="btn-primary" onclick="submitScaffold()" data-label="Run Scaffold">Run Scaffold</button>
+  </div>
+
+  <!-- PROCEDURE -->
+  <div id="page-pr" class="page">
+    <div class="field"><label>Procedure name</label><input id="pr-name" type="text" placeholder="GetOrderById (leave empty to list from DB)"></div>
+    <div class="field"><label>Schema</label><input id="pr-schema" type="text" placeholder="(auto-detect)"></div>
+    <p class="hint">Deixe o nome em branco para listar as procedures do banco via terminal.</p>
+    <div id="pr-err" class="err"></div>
+    <button id="pr-btn" class="btn-primary" onclick="submitProcedure()" data-label="Generate Procedure">Generate Procedure</button>
+  </div>
+
+  <!-- EXTENSION -->
+  <div id="page-ext" class="page">
+    <div class="field"><label>Extension</label>
+      <select id="ext-name" onchange="onExtChange()">
+        <option value="jwt">JWT Authentication</option>
+        <option value="healthchecks">Health Checks</option>
+        <option value="cache">Distributed Cache</option>
+      </select>
+    </div>
+    <div id="ext-prov-field" class="field hidden"><label>Provider</label>
+      <select id="ext-prov">
+        <option value="redis">Redis</option>
+        <option value="azure">Azure Cache</option>
+      </select>
+    </div>
+    <div id="ext-err" class="err"></div>
+    <button id="ext-btn" class="btn-primary" onclick="submitExtension()" data-label="Add Extension">Add Extension</button>
+  </div>
+
+  <!-- BUILD -->
+  <div id="page-build" class="page">
+    <div class="field"><label>Configuration</label>
+      <select id="build-cfg"><option value="Debug">Debug</option><option value="Release">Release</option></select>
+    </div>
+    <div class="field"><label class="check-label"><input id="build-nr" type="checkbox"> Skip restore (--no-restore)</label></div>
+    <div id="build-err" class="err"></div>
+    <button id="build-btn" class="btn-primary" onclick="submitBuild()" data-label="Build">Build</button>
+  </div>
+
+  <!-- RUN -->
+  <div id="page-run" class="page">
+    <div class="field"><label>Configuration</label>
+      <select id="run-cfg"><option value="Debug">Debug</option><option value="Release">Release</option></select>
+    </div>
+    <div class="field"><label class="check-label"><input id="run-nb" type="checkbox"> Skip build (--no-build)</label></div>
+    <div id="run-err" class="err"></div>
+    <button id="run-btn" class="btn-primary" onclick="submitRun()" data-label="Run">Run</button>
+    <button id="run-stop" class="btn-danger hidden" onclick="stopRun()">Stop</button>
+  </div>
+
+  <!-- UPDATE -->
+  <div id="page-update" class="page">
+    <p class="hint" style="margin-bottom:10px">Atualiza o OpenBase CLI e templates para a versão mais recente.</p>
+    <div id="update-err" class="err"></div>
+    <button id="update-btn" class="btn-primary" onclick="submitUpdate()" data-label="Update OpenBase CLI">Update OpenBase CLI</button>
+  </div>
 
   <script>
     const vscode = acquireVsCodeApi();
 
-    document.getElementById('template').addEventListener('change', function() {
-      document.getElementById('dbServer').placeholder = this.value === 'sqlserver' ? '.' : 'localhost';
-    });
+    function nav(el, page) {
+      document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+      document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
+      document.getElementById('page-' + page).classList.add('active');
+      el.classList.add('active');
+    }
+
+    function onTplChange() {
+      document.getElementById('new-srv').placeholder = document.getElementById('new-tpl').value === 'sqlserver' ? '.' : 'localhost';
+    }
+    function onScMode() {
+      var mf = document.getElementById('sc-mode').value === 'modelfirst';
+      document.getElementById('sc-mf').classList.toggle('hidden', !mf);
+      document.getElementById('sc-cf-hint').classList.toggle('hidden', mf);
+    }
+    function onExtChange() {
+      document.getElementById('ext-prov-field').classList.toggle('hidden', document.getElementById('ext-name').value !== 'cache');
+    }
 
     function pickFolder() { vscode.postMessage({ command: 'pickFolder' }); }
 
-    window.addEventListener('message', e => {
-      const m = e.data;
-      if (m.command === 'folderPicked') {
-        document.getElementById('folder').value = m.path;
-      } else if (m.command === 'done') {
-        setLoading(false);
-      } else if (m.command === 'error') {
-        setLoading(false);
-        showError(m.text);
-      }
-    });
-
-    function showError(msg) {
-      const el = document.getElementById('err');
+    function err(ctx, msg) {
+      var el = document.getElementById(ctx + '-err');
+      if (!el) return;
       el.textContent = msg;
       el.style.display = msg ? 'block' : 'none';
     }
-
-    function setLoading(on) {
-      const btn = document.getElementById('btnCreate');
+    function loading(ctx, on) {
+      var btn = document.getElementById(ctx + '-btn');
+      if (!btn) return;
       btn.disabled = on;
-      btn.textContent = on ? 'Creating…' : 'Create Project';
+      btn.textContent = on ? 'Running…' : (btn.dataset.label || btn.textContent);
     }
 
-    function create() {
-      showError('');
-      const name = document.getElementById('name').value.trim();
-      if (!name) { showError('Project name is required.'); return; }
-      if (!/^[a-zA-Z0-9._-]+$/.test(name)) { showError('Invalid project name.'); return; }
-      setLoading(true);
-      vscode.postMessage({
-        command: 'newProject',
-        data: {
-          name,
-          template: document.getElementById('template').value,
-          dbServer: document.getElementById('dbServer').value.trim(),
-          dbName: document.getElementById('dbName').value.trim(),
-          dbUser: document.getElementById('dbUser').value.trim(),
-          dbPassword: document.getElementById('dbPassword').value.trim(),
-          mediatrLicense: document.getElementById('mediatrLicense').value.trim(),
-          automapperLicense: document.getElementById('automapperLicense').value.trim(),
-          folder: document.getElementById('folder').value.trim(),
-        }
-      });
+    window.addEventListener('message', function(e) {
+      var m = e.data;
+      if (m.command === 'folderPicked') {
+        document.getElementById('new-folder').value = m.path;
+      } else if (m.command === 'done') {
+        loading(m.ctx, false);
+      } else if (m.command === 'error') {
+        loading(m.ctx, false);
+        err(m.ctx, m.text);
+      } else if (m.command === 'runStarted') {
+        document.getElementById('run-btn').classList.add('hidden');
+        document.getElementById('run-stop').classList.remove('hidden');
+      } else if (m.command === 'runStopped') {
+        document.getElementById('run-btn').classList.remove('hidden');
+        document.getElementById('run-stop').classList.add('hidden');
+        loading('run', false);
+      }
+    });
+
+    function submitNew() {
+      var name = document.getElementById('new-name').value.trim();
+      err('new', '');
+      if (!name) { err('new', 'Project name is required.'); return; }
+      if (!/^[a-zA-Z0-9._-]+$/.test(name)) { err('new', 'Invalid project name.'); return; }
+      loading('new', true);
+      vscode.postMessage({ command: 'newProject', data: {
+        name: name,
+        template: document.getElementById('new-tpl').value,
+        dbServer: document.getElementById('new-srv').value.trim(),
+        dbName: document.getElementById('new-db').value.trim(),
+        dbUser: document.getElementById('new-usr').value.trim(),
+        dbPassword: document.getElementById('new-pwd').value.trim(),
+        mediatrLicense: document.getElementById('new-mediatR').value.trim(),
+        automapperLicense: document.getElementById('new-automapper').value.trim(),
+        folder: document.getElementById('new-folder').value.trim(),
+      }});
+    }
+
+    function submitScaffold() {
+      var entity = document.getElementById('sc-entity').value.trim();
+      err('sc', '');
+      if (!entity) { err('sc', 'Entity name is required.'); return; }
+      if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('sc', 'Must be PascalCase (e.g. Product).'); return; }
+      loading('sc', true);
+      vscode.postMessage({ command: 'scaffold', data: {
+        entity: entity,
+        mode: document.getElementById('sc-mode').value,
+        schema: document.getElementById('sc-schema').value.trim(),
+        table: document.getElementById('sc-table').value.trim(),
+        runMigrations: document.getElementById('sc-mig').checked,
+      }});
+    }
+
+    function submitProcedure() {
+      var name = document.getElementById('pr-name').value.trim();
+      err('pr', '');
+      if (name && !/^[A-Z][a-zA-Z0-9]*$/.test(name)) { err('pr', 'Must be PascalCase (e.g. GetOrderById).'); return; }
+      loading('pr', true);
+      vscode.postMessage({ command: 'procedure', data: {
+        name: name,
+        schema: document.getElementById('pr-schema').value.trim(),
+      }});
+    }
+
+    function submitExtension() {
+      err('ext', '');
+      loading('ext', true);
+      var name = document.getElementById('ext-name').value;
+      vscode.postMessage({ command: 'extensionAdd', data: {
+        name: name,
+        provider: name === 'cache' ? document.getElementById('ext-prov').value : '',
+      }});
+    }
+
+    function submitBuild() {
+      err('build', '');
+      loading('build', true);
+      vscode.postMessage({ command: 'build', data: {
+        configuration: document.getElementById('build-cfg').value,
+        noRestore: document.getElementById('build-nr').checked,
+      }});
+    }
+
+    function submitRun() {
+      err('run', '');
+      loading('run', true);
+      vscode.postMessage({ command: 'run', data: {
+        configuration: document.getElementById('run-cfg').value,
+        noBuild: document.getElementById('run-nb').checked,
+      }});
+    }
+
+    function stopRun() { vscode.postMessage({ command: 'stopRun' }); }
+
+    function submitUpdate() {
+      err('update', '');
+      loading('update', true);
+      vscode.postMessage({ command: 'update' });
     }
   </script>
 </body>
