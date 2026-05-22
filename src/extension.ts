@@ -1903,7 +1903,7 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
-  <button id="send-btn" class="btn btn-primary" onclick="sendRequest()">▶ Send</button>
+  <button id="send-btn" class="btn btn-primary">▶ Send</button>
 </div>
 
 <!-- REQUEST TABS -->
@@ -1965,11 +1965,12 @@ function buildHttpRunnerHtml(baseUrl: string): string {
   addHeader('Content-Type', 'application/json');
   addHeader('Accept', 'application/json');
 
+  document.getElementById('send-btn').addEventListener('click', sendRequest);
   document.getElementById('url-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendRequest();
   });
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'F5') { e.preventDefault(); sendRequest(); }
+    if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
   });
 
   function onMethodChange(sel) {
