@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -101,6 +101,13 @@
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "openbase.specialist",
+          "when": "view == openbase.panel",
+          "group": "1_openbase"
+        }
+      ],
       "explorer/context": [
         {
           "command": "openbase.newProject",
