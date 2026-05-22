@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
-import { execSync, exec } from 'child_process';
+import * as fs from 'fs';
+import { execSync, exec, spawn } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
@@ -421,6 +422,35 @@ async function extensionList(uri?: vscode.Uri): Promise<void> {
     openTerminal('Extension List', cwd, 'openbase extension list');
 }
 
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+function findEntryProject(workspaceRoot: string): { csprojPath: string; targetFramework: string; assemblyName: string } | undefined {
+    const found: string[] = [];
+
+    function scan(dir: string, depth: number): void {
+        if (depth > 4) return;
+        try {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+                    scan(path.join(dir, entry.name), depth + 1);
+                } else if (entry.isFile() && entry.name.endsWith('.csproj')) {
+                    found.push(path.join(dir, entry.name));
+                }
+            }
+        } catch { /* ignore */ }
+    }
+
+    scan(workspaceRoot, 0);
+    if (found.length === 0) return undefined;
+
+    const preferred = found.find(f => /\.(api|web)\.csproj$/i.test(path.basename(f))) ?? found[0];
+    const content = fs.readFileSync(preferred, 'utf-8');
+    const tfm = content.match(/<TargetFramework>([^<]+)<\/TargetFramework>/)?.[1]?.trim() ?? 'net8.0';
+    const assemblyName = content.match(/<AssemblyName>([^<]+)<\/AssemblyName>/)?.[1]?.trim() ?? path.basename(preferred, '.csproj');
+
+    return { csprojPath: preferred, targetFramework: tfm, assemblyName };
+}
+
 // ─── build ──────────────────────────────────────────────────────────────────
 
 async function build(uri?: vscode.Uri): Promise<void> {
@@ -444,6 +474,74 @@ async function build(uri?: vscode.Uri): Promise<void> {
 
     const flags = noRestore.label === 'Yes' ? ' --no-restore' : '';
     openTerminal('Build', cwd, `openbase build -c ${config.label}${flags}`);
+}
+
+// ─── debug ──────────────────────────────────────────────────────────────────
+
+async function debugRun(uri?: vscode.Uri): Promise<void> {
+    if (!await guardInstalled()) return;
+
+    const config = await vscode.window.showQuickPick(
+        BUILD_CONFIGS.map((c): vscode.QuickPickItem => ({ label: c })),
+        { title: 'OpenBase: Debug — Configuration' }
+    );
+    if (!config) return;
+
+    const noBuild = await vscode.window.showQuickPick(
+        [{ label: 'No', description: 'Build before debug' },
+         { label: 'Yes', description: 'Skip build step' }],
+        { title: 'OpenBase: Debug — Skip build?' }
+    );
+    if (!noBuild) return;
+
+    const cwd = await resolveWorkingDir(uri);
+    if (!cwd) return;
+
+    if (noBuild.label === 'No') {
+        const channel = vscode.window.createOutputChannel('OpenBase: Debug Build');
+        channel.show(true);
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        const ok = await new Promise<boolean>((resolve) => {
+            const child = exec(`openbase build -c ${config.label}`, { cwd, env });
+            child.stdout?.on('data', (d: string) => channel.append(d));
+            child.stderr?.on('data', (d: string) => channel.append(d));
+            child.on('close', (code) => resolve(code === 0));
+            child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
+        });
+        if (!ok) {
+            vscode.window.showErrorMessage('Build failed. Check the output panel.');
+            return;
+        }
+    }
+
+    const project = findEntryProject(cwd);
+    if (!project) {
+        vscode.window.showErrorMessage('No .csproj found in workspace.');
+        return;
+    }
+
+    const dllPath = path.join(path.dirname(project.csprojPath), 'bin', config.label, project.targetFramework, `${project.assemblyName}.dll`);
+    if (!fs.existsSync(dllPath)) {
+        vscode.window.showErrorMessage(`Built output not found: ${dllPath}`);
+        return;
+    }
+
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const started = await vscode.debug.startDebugging(folder, {
+        type: 'coreclr',
+        request: 'launch',
+        name: 'OpenBase Debug',
+        program: dllPath,
+        cwd: path.dirname(project.csprojPath),
+        stopAtEntry: false,
+        env: { ASPNETCORE_ENVIRONMENT: 'Development' },
+        serverReadyAction: { action: 'openExternally', pattern: '\\bNow listening on:\\s+(https?://\\S+)' },
+    });
+
+    if (!started) {
+        vscode.window.showErrorMessage('Failed to start debugger. Is the C# extension installed?');
+    }
 }
 
 // ─── run ────────────────────────────────────────────────────────────────────
@@ -548,8 +646,15 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             case 'procedure':    await this._procedure(msg.data as never, view);    break;
             case 'extensionAdd': await this._extensionAdd(msg.data as never, view); break;
             case 'build':        await this._build(msg.data as never, view);        break;
+            case 'debug':        await this._debug(msg.data as never, view);        break;
             case 'run':          await this._run(msg.data as never, view);          break;
-            case 'stopRun':      this._runProcess?.kill(); break;
+            case 'stopRun': {
+                const proc = this._runProcess;
+                if (proc?.pid) {
+                    try { process.kill(-proc.pid, 'SIGTERM'); } catch { proc.kill('SIGTERM'); }
+                }
+                break;
+            }
             case 'history':      await this._exec('openbase history', await this._cwd() ?? process.cwd(), view, 'history', 'OpenBase: History'); break;
             case 'update':       await this._exec('openbase update',  await this._cwd() ?? process.cwd(), view, 'update',  'OpenBase: Update');  break;
         }
@@ -652,6 +757,46 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         await this._exec(`openbase extension add ${args}`, cwd, view, 'ext', 'OpenBase: Extension');
     }
 
+    private async _debug(d: { configuration: string; noBuild: boolean }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'debug' }); return; }
+
+        if (!d.noBuild) {
+            const ok = await this._exec(`openbase build -c ${d.configuration}`, cwd, view, 'debug', 'OpenBase: Debug Build');
+            if (!ok) return;
+        }
+
+        const project = findEntryProject(cwd);
+        if (!project) {
+            view.webview.postMessage({ command: 'error', ctx: 'debug', text: 'No .csproj found in workspace.' });
+            return;
+        }
+
+        const dllPath = path.join(path.dirname(project.csprojPath), 'bin', d.configuration, project.targetFramework, `${project.assemblyName}.dll`);
+        if (!fs.existsSync(dllPath)) {
+            view.webview.postMessage({ command: 'error', ctx: 'debug', text: `Built output not found: ${dllPath}` });
+            return;
+        }
+
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const started = await vscode.debug.startDebugging(folder, {
+            type: 'coreclr',
+            request: 'launch',
+            name: 'OpenBase Debug',
+            program: dllPath,
+            cwd: path.dirname(project.csprojPath),
+            stopAtEntry: false,
+            env: { ASPNETCORE_ENVIRONMENT: 'Development' },
+            serverReadyAction: { action: 'openExternally', pattern: '\\bNow listening on:\\s+(https?://\\S+)' },
+        });
+
+        if (started) {
+            view.webview.postMessage({ command: 'done', ctx: 'debug', text: 'Debugger launched.' });
+        } else {
+            view.webview.postMessage({ command: 'error', ctx: 'debug', text: 'Failed to start debugger. Is the C# extension installed?' });
+        }
+    }
+
     private async _build(d: { configuration: string; noRestore: boolean }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'build' }); return; }
@@ -663,14 +808,16 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'run' }); return; }
 
-        const flags = d.noBuild ? ' --no-build' : '';
+        const args = ['run', '-c', d.configuration];
+        if (d.noBuild) args.push('--no-build');
+
         const channel = vscode.window.createOutputChannel('OpenBase: Run');
         channel.show(true);
 
         const extraPath = dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
-        this._runProcess = exec(`openbase run -c ${d.configuration}${flags}`, { cwd, env });
+        this._runProcess = spawn('openbase', args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
         this._runProcess.stdout?.on('data', (chunk: string) => channel.append(chunk));
         this._runProcess.stderr?.on('data', (chunk: string) => channel.append(chunk));
         view.webview.postMessage({ command: 'runStarted' });
@@ -771,6 +918,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div class="nav-item"        data-page="pr"      onclick="nav(this,'pr')">Procedure</div>
     <div class="nav-item"        data-page="ext"     onclick="nav(this,'ext')">Extension</div>
     <div class="nav-item"        data-page="build"   onclick="nav(this,'build')">Build</div>
+    <div class="nav-item"        data-page="debug"   onclick="nav(this,'debug')">Debug</div>
     <div class="nav-item"        data-page="run"     onclick="nav(this,'run')">Run</div>
     <div class="nav-item"        data-page="update"  onclick="nav(this,'update')">Update CLI</div>
     <div class="nav-item"        data-page="history" onclick="nav(this,'history')">History</div>
@@ -908,6 +1056,18 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div id="build-err" class="err"></div>
     <div id="build-ok" class="ok"></div>
     <button id="build-btn" class="btn-primary" onclick="submitBuild()" data-label="Build">Build</button>
+  </div>
+
+  <!-- DEBUG -->
+  <div id="page-debug" class="page">
+    <div class="field"><label>Configuration</label>
+      <select id="debug-cfg"><option value="Debug">Debug</option><option value="Release">Release</option></select>
+    </div>
+    <div class="field"><label class="check-label"><input id="debug-nb" type="checkbox"> Skip build (--no-build)</label></div>
+    <p class="hint" style="margin-top:6px">Requer a extensão C# (coreclr) instalada no VS Code.</p>
+    <div id="debug-err" class="err"></div>
+    <div id="debug-ok" class="ok"></div>
+    <button id="debug-btn" class="btn-primary" onclick="submitDebug()" data-label="Build &amp; Debug">Build &amp; Debug</button>
   </div>
 
   <!-- RUN -->
@@ -1125,6 +1285,15 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       }});
     }
 
+    function submitDebug() {
+      err('debug', '');
+      loading('debug', true);
+      vscode.postMessage({ command: 'debug', data: {
+        configuration: document.getElementById('debug-cfg').value,
+        noBuild: document.getElementById('debug-nb').checked,
+      }});
+    }
+
     function submitRun() {
       err('run', '');
       loading('run', true);
@@ -1171,6 +1340,7 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.extensionAdd',   extensionAdd),
         reg('openbase.extensionList',  extensionList),
         reg('openbase.build',          build),
+        reg('openbase.debug',          debugRun),
         reg('openbase.run',            run),
         reg('openbase.update',         update),
         reg('openbase.history',        history),
