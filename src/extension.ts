@@ -423,6 +423,234 @@ function extensionLabel(e: string): string {
     }
 }
 
+// ─── panel ───────────────────────────────────────────────────────────────────
+
+class OpenBasePanelProvider implements vscode.WebviewViewProvider {
+    static readonly viewType = 'openbase.panel';
+
+    resolveWebviewView(view: vscode.WebviewView): void {
+        view.webview.options = { enableScripts: true };
+        view.webview.html = this._html();
+
+        view.webview.onDidReceiveMessage(async (msg) => {
+            if (msg.command === 'pickFolder') {
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFiles: false,
+                    canSelectFolders: true,
+                    canSelectMany: false,
+                    openLabel: 'Select project folder',
+                });
+                if (picked?.[0]) {
+                    view.webview.postMessage({ command: 'folderPicked', path: picked[0].fsPath });
+                }
+            } else if (msg.command === 'newProject') {
+                await this._create(msg.data, view);
+            }
+        });
+    }
+
+    private async _create(data: {
+        name: string; template: string; dbServer: string; dbName: string;
+        dbUser: string; dbPassword: string; mediatrLicense: string;
+        automapperLicense: string; folder: string;
+    }, view: vscode.WebviewView): Promise<void> {
+        if (!await guardInstalled()) {
+            view.webview.postMessage({ command: 'error', text: 'OpenBase CLI not found.' });
+            return;
+        }
+
+        let cwd = data.folder;
+        if (!cwd) {
+            const folders = vscode.workspace.workspaceFolders;
+            if (folders?.length === 1) {
+                cwd = folders[0].uri.fsPath;
+            } else {
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+                    openLabel: 'Select project folder',
+                });
+                if (!picked?.[0]) { view.webview.postMessage({ command: 'done' }); return; }
+                cwd = picked[0].fsPath;
+            }
+        }
+
+        const args: string[] = [`-n ${data.name}`, `-s ${data.template}`];
+        if (data.dbServer)          args.push(`--db-server "${data.dbServer}"`);
+        if (data.dbName)            args.push(`--db-name "${data.dbName}"`);
+        if (data.dbUser)            args.push(`--db-user "${data.dbUser}"`);
+        if (data.dbPassword)        args.push(`--db-password "${data.dbPassword}"`);
+        if (data.mediatrLicense)    args.push(`--mediatr-license "${data.mediatrLicense}"`);
+        if (data.automapperLicense) args.push(`--automapper-license "${data.automapperLicense}"`);
+
+        const channel = vscode.window.createOutputChannel('OpenBase: New Project');
+        channel.show(true);
+
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+
+        const success = await new Promise<boolean>((resolve) => {
+            const child = exec(`openbase new ${args.join(' ')}`, { cwd, env });
+            child.stdout?.on('data', (d: string) => channel.append(d));
+            child.stderr?.on('data', (d: string) => channel.append(d));
+            child.on('close', (code) => resolve(code === 0));
+            child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
+        });
+
+        view.webview.postMessage({ command: 'done' });
+
+        if (!success) {
+            view.webview.postMessage({ command: 'error', text: `Failed to create "${data.name}". Check the output panel.` });
+            return;
+        }
+
+        const projectUri = vscode.Uri.file(path.join(cwd, data.name));
+        const action = await vscode.window.showInformationMessage(
+            `Project "${data.name}" created successfully!`,
+            'Open Folder', 'Open in New Window'
+        );
+        if (action === 'Open Folder') {
+            vscode.commands.executeCommand('vscode.openFolder', projectUri, false);
+        } else if (action === 'Open in New Window') {
+            vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
+        }
+    }
+
+    private _html(): string {
+        return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{padding:0 12px 16px;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground)}
+    .field{margin-bottom:10px}
+    label{display:block;margin-bottom:3px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--vscode-descriptionForeground)}
+    input,select{width:100%;padding:4px 7px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);font-family:inherit;font-size:inherit;outline:none}
+    input:focus,select:focus{border-color:var(--vscode-focusBorder)}
+    input::placeholder{color:var(--vscode-input-placeholderForeground)}
+    .row{display:flex;gap:6px}
+    .row input{flex:1;min-width:0}
+    .btn{padding:4px 8px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
+    .btn-secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
+    .btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}
+    .btn-primary{width:100%;padding:6px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);margin-top:6px}
+    .btn-primary:hover{background:var(--vscode-button-hoverBackground)}
+    .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+    hr{border:none;border-top:1px solid var(--vscode-panel-border);margin:12px 0}
+    .error{margin-top:8px;padding:5px 7px;font-size:12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);display:none}
+  </style>
+</head>
+<body>
+  <div class="field">
+    <label>Project name *</label>
+    <input id="name" type="text" placeholder="MyProject">
+  </div>
+  <div class="field">
+    <label>Database</label>
+    <select id="template">
+      <option value="sqlserver">SQL Server</option>
+      <option value="pgsql">PostgreSQL</option>
+      <option value="oracle">Oracle</option>
+    </select>
+  </div>
+  <hr>
+  <div class="field">
+    <label>DB Server</label>
+    <input id="dbServer" type="text" placeholder=".">
+  </div>
+  <div class="field">
+    <label>DB Name</label>
+    <input id="dbName" type="text" placeholder="(same as project name)">
+  </div>
+  <div class="field">
+    <label>DB User</label>
+    <input id="dbUser" type="text" placeholder="Windows Auth / postgres">
+  </div>
+  <div class="field">
+    <label>DB Password</label>
+    <input id="dbPassword" type="password">
+  </div>
+  <hr>
+  <div class="field">
+    <label>MediatR License</label>
+    <input id="mediatrLicense" type="text" placeholder="(optional)">
+  </div>
+  <div class="field">
+    <label>AutoMapper License</label>
+    <input id="automapperLicense" type="text" placeholder="(optional)">
+  </div>
+  <hr>
+  <div class="field">
+    <label>Destination folder</label>
+    <div class="row">
+      <input id="folder" type="text" placeholder="(workspace folder)" readonly>
+      <button class="btn btn-secondary" onclick="pickFolder()">Browse</button>
+    </div>
+  </div>
+  <div id="err" class="error"></div>
+  <button id="btnCreate" class="btn btn-primary" onclick="create()">Create Project</button>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+
+    document.getElementById('template').addEventListener('change', function() {
+      document.getElementById('dbServer').placeholder = this.value === 'sqlserver' ? '.' : 'localhost';
+    });
+
+    function pickFolder() { vscode.postMessage({ command: 'pickFolder' }); }
+
+    window.addEventListener('message', e => {
+      const m = e.data;
+      if (m.command === 'folderPicked') {
+        document.getElementById('folder').value = m.path;
+      } else if (m.command === 'done') {
+        setLoading(false);
+      } else if (m.command === 'error') {
+        setLoading(false);
+        showError(m.text);
+      }
+    });
+
+    function showError(msg) {
+      const el = document.getElementById('err');
+      el.textContent = msg;
+      el.style.display = msg ? 'block' : 'none';
+    }
+
+    function setLoading(on) {
+      const btn = document.getElementById('btnCreate');
+      btn.disabled = on;
+      btn.textContent = on ? 'Creating…' : 'Create Project';
+    }
+
+    function create() {
+      showError('');
+      const name = document.getElementById('name').value.trim();
+      if (!name) { showError('Project name is required.'); return; }
+      if (!/^[a-zA-Z0-9._-]+$/.test(name)) { showError('Invalid project name.'); return; }
+      setLoading(true);
+      vscode.postMessage({
+        command: 'newProject',
+        data: {
+          name,
+          template: document.getElementById('template').value,
+          dbServer: document.getElementById('dbServer').value.trim(),
+          dbName: document.getElementById('dbName').value.trim(),
+          dbUser: document.getElementById('dbUser').value.trim(),
+          dbPassword: document.getElementById('dbPassword').value.trim(),
+          mediatrLicense: document.getElementById('mediatrLicense').value.trim(),
+          automapperLicense: document.getElementById('automapperLicense').value.trim(),
+          folder: document.getElementById('folder').value.trim(),
+        }
+      });
+    }
+  </script>
+</body>
+</html>`;
+    }
+}
+
 // ─── activate ────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -430,6 +658,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand(id, fn);
 
     context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(OpenBasePanelProvider.viewType, new OpenBasePanelProvider()),
         reg('openbase.newProject',    newProject),
         reg('openbase.scaffold',      scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
