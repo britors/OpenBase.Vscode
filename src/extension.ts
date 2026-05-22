@@ -1958,7 +1958,7 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
-  <button id="send-btn" class="btn btn-primary" onclick="sendRequest()">▶ Send</button>
+  <button id="send-btn" class="btn btn-primary">▶ Send</button>
 </div>
 
 <!-- REQUEST TABS -->
