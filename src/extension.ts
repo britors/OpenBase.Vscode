@@ -2138,10 +2138,36 @@ function buildHttpRunnerHtml(baseUrl: string): string {
 </html>`;
 }
 
+// ─── status bar ──────────────────────────────────────────────────────────────
+
+function setupStatusBar(context: vscode.ExtensionContext): void {
+    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    item.command = 'openbase.sqlRunner';
+    context.subscriptions.push(item);
+
+    function refresh(): void {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) { item.hide(); return; }
+        const conn = findConnection(folder.uri.fsPath);
+        if (!conn) { item.hide(); return; }
+        item.text = `$(database) ${conn.label}`;
+        item.tooltip = `OpenBase — ${conn.type} · Clique para abrir o SQL Runner`;
+        item.show();
+    }
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(refresh),
+        vscode.window.onDidChangeActiveTextEditor(refresh),
+    );
+
+    refresh();
+}
+
 // ─── activate ────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
     panelProvider = new OpenBasePanelProvider();
+    setupStatusBar(context);
 
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
