@@ -1573,12 +1573,12 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   <textarea id="sql" placeholder="SELECT * FROM ..." spellcheck="false" autofocus></textarea>
 </div>
 <div class="toolbar">
-  <button id="run-btn" class="btn btn-primary" onclick="run()">▶ Run</button>
-  <span class="hint">F5 to run</span>
+  <button id="run-btn" class="btn btn-primary">▶ Run</button>
+  <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
 <div id="results" class="results">
-  <p class="placeholder">Write a query above and press Run or F5</p>
+  <p class="placeholder">Write a query above and press Run or F8</p>
 </div>
 
 <script>
@@ -1586,8 +1586,10 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   let running = false, t0 = 0;
   let lastColumns = [], lastRows = [];
 
+  document.getElementById('run-btn').addEventListener('click', run);
+
   document.getElementById('sql').addEventListener('keydown', function(e) {
-    if (e.key === 'F5') { e.preventDefault(); run(); return; }
+    if (e.key === 'F8') { e.preventDefault(); run(); return; }
     if (e.key === 'Tab') {
       e.preventDefault();
       var s = this.selectionStart, end = this.selectionEnd;
