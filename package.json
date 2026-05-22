@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.0.1",
+  "version": "10.1.0",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -101,10 +101,22 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "openbase.scaffold",       "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.scaffoldUpdate", "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.specialist",     "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.procedure",      "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.extensionAdd",   "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.extensionList",  "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.build",          "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.run",            "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.update",         "when": "openbase.isOpenBaseProject" },
+        { "command": "openbase.history",        "when": "openbase.isOpenBaseProject" }
+      ],
       "view/title": [
         {
           "command": "openbase.specialist",
-          "when": "view == openbase.panel",
+          "when": "view == openbase.panel && openbase.isOpenBaseProject",
           "group": "1_openbase"
         }
       ],
@@ -116,27 +128,27 @@
         },
         {
           "command": "openbase.scaffold",
-          "when": "explorerResourceIsFolder",
+          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
           "group": "openbase@2"
         },
         {
           "command": "openbase.scaffoldUpdate",
-          "when": "explorerResourceIsFolder",
+          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
           "group": "openbase@3"
         },
         {
           "command": "openbase.specialist",
-          "when": "explorerResourceIsFolder",
+          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
           "group": "openbase@4"
         },
         {
           "command": "openbase.procedure",
-          "when": "explorerResourceIsFolder",
+          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
           "group": "openbase@5"
         },
         {
           "command": "openbase.extensionAdd",
-          "when": "explorerResourceIsFolder",
+          "when": "explorerResourceIsFolder && openbase.isOpenBaseProject",
           "group": "openbase@6"
         }
       ]
