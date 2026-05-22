@@ -2138,6 +2138,70 @@ function buildHttpRunnerHtml(baseUrl: string): string {
 </html>`;
 }
 
+// ─── sql runner sidebar ───────────────────────────────────────────────────────
+
+class SqlRunnerSidebarProvider implements vscode.WebviewViewProvider {
+    static readonly viewType = 'openbase.sqlrunner.sidebar';
+
+    resolveWebviewView(view: vscode.WebviewView): void {
+        view.webview.options = { enableScripts: true };
+        view.webview.html = this._html('SQL Runner', 'Open SQL Runner');
+        view.onDidChangeVisibility(() => { if (view.visible) sqlRunner(); });
+        view.webview.onDidReceiveMessage((msg) => { if (msg.command === 'open') sqlRunner(); });
+        sqlRunner();
+    }
+
+    private _html(title: string, btnLabel: string): string {
+        return /* html */`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<style>
+  body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:16px;text-align:center}
+  p{color:var(--vscode-descriptionForeground);font-size:12px;margin-bottom:12px}
+  button{padding:6px 12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-family:inherit;font-size:inherit;width:100%}
+  button:hover{background:var(--vscode-button-hoverBackground)}
+</style></head>
+<body>
+  <p>${title} is open in the editor panel.</p>
+  <button onclick="vscode.postMessage({command:'open'})">${btnLabel}</button>
+  <script>const vscode = acquireVsCodeApi();</script>
+</body></html>`;
+    }
+}
+
+// ─── http runner sidebar ──────────────────────────────────────────────────────
+
+class HttpRunnerSidebarProvider implements vscode.WebviewViewProvider {
+    static readonly viewType = 'openbase.httprunner.sidebar';
+
+    resolveWebviewView(view: vscode.WebviewView): void {
+        view.webview.options = { enableScripts: true };
+        view.webview.html = this._html('HTTP Runner', 'Open HTTP Runner');
+        view.onDidChangeVisibility(() => { if (view.visible) httpRunner(); });
+        view.webview.onDidReceiveMessage((msg) => { if (msg.command === 'open') httpRunner(); });
+        httpRunner();
+    }
+
+    private _html(title: string, btnLabel: string): string {
+        return /* html */`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<style>
+  body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:16px;text-align:center}
+  p{color:var(--vscode-descriptionForeground);font-size:12px;margin-bottom:12px}
+  button{padding:6px 12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-family:inherit;font-size:inherit;width:100%}
+  button:hover{background:var(--vscode-button-hoverBackground)}
+</style></head>
+<body>
+  <p>${title} is open in the editor panel.</p>
+  <button onclick="vscode.postMessage({command:'open'})">${btnLabel}</button>
+  <script>const vscode = acquireVsCodeApi();</script>
+</body></html>`;
+    }
+}
+
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
@@ -2174,6 +2238,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(OpenBasePanelProvider.viewType, panelProvider),
+        vscode.window.registerWebviewViewProvider(SqlRunnerSidebarProvider.viewType, new SqlRunnerSidebarProvider()),
+        vscode.window.registerWebviewViewProvider(HttpRunnerSidebarProvider.viewType, new HttpRunnerSidebarProvider()),
         reg('openbase.newProject',     newProject),
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
