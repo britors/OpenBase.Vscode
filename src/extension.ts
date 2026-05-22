@@ -1618,9 +1618,11 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   const vscode = acquireVsCodeApi();
   let running = false, t0 = 0;
   let lastColumns = [], lastRows = [];
+  let runTimeoutId = null;
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
+    clearRunTimeout();
     vscode.postMessage({ command: 'cancel' });
   });
   document.getElementById('results').addEventListener('click', function(e) {
@@ -1639,13 +1641,37 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
     }
   });
 
+  function clearRunTimeout() {
+    if (runTimeoutId) { clearTimeout(runTimeoutId); runTimeoutId = null; }
+  }
+
   function run() {
     if (running) return;
-    var sql = document.getElementById('sql').value.trim();
+    var sqlEl = document.getElementById('sql');
+    var sql = sqlEl ? sqlEl.value.trim() : '';
     if (!sql) {
       document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
       return;
     }
+
+    // Immediate feedback — don't wait for extension to respond
+    running = true;
+    t0 = Date.now();
+    document.getElementById('run-btn').classList.add('hidden');
+    document.getElementById('cancel-btn').classList.remove('hidden');
+    document.getElementById('results').innerHTML = '';
+    setStatus('<span class="spinner"></span> Sending…');
+
+    // Client-side safety timeout in case extension never responds
+    runTimeoutId = setTimeout(function() {
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      document.getElementById('results').innerHTML =
+        '<div class="err-box">Extension did not respond after 10s.\nMake sure an OpenBase project with appsettings.json is open in the workspace.</div>';
+    }, 10000);
+
     vscode.postMessage({ command: 'run', sql: sql });
   }
 
@@ -1669,11 +1695,9 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerRun') { run(); return; }
+    clearRunTimeout();
     if (m.command === 'running') {
       running = true; t0 = Date.now();
-      document.getElementById('run-btn').classList.add('hidden');
-      document.getElementById('cancel-btn').classList.remove('hidden');
-      document.getElementById('results').innerHTML = '';
       setStatus('<span class="spinner"></span> Running…');
     } else if (m.command === 'result') {
       running = false;
