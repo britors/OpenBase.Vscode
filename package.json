@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -14,6 +14,24 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "openbase",
+          "title": "OpenBase",
+          "icon": "icon-activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "openbase": [
+        {
+          "type": "webview",
+          "id": "openbase.panel",
+          "name": "New Project"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "openbase.newProject",
