@@ -6,6 +6,8 @@ import { execSync, exec } from 'child_process';
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
 const EXTENSIONS = ['jwt', 'cache', 'healthchecks'] as const;
+const SPECIALIST_TYPES = ['query', 'command', 'httpcall'] as const;
+const PARAM_TYPES = ['string', 'int', 'bool', 'decimal', 'Guid', 'DateTime', 'long', 'double', 'float', 'short'] as const;
 const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {
     cache: ['redis', 'azure'],
 };
@@ -240,7 +242,7 @@ async function specialist(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
 
     const entity = await vscode.window.showInputBox({
-        title: 'OpenBase: Specialist',
+        title: 'OpenBase: Specialist (1/4) — Entity',
         prompt: 'Entity name (PascalCase)',
         placeHolder: 'Product',
         validateInput: (v) => {
@@ -250,10 +252,99 @@ async function specialist(uri?: vscode.Uri): Promise<void> {
     });
     if (!entity) return;
 
+    const method = await vscode.window.showInputBox({
+        title: 'OpenBase: Specialist (2/4) — Method name',
+        prompt: 'Method name (PascalCase)',
+        placeHolder: 'GetByCategoria',
+        validateInput: (v) => {
+            if (!v.trim()) return 'Method name is required';
+            if (!/^[A-Z][a-zA-Z0-9]*$/.test(v)) return 'Must be PascalCase (e.g. GetByCategoria)';
+        },
+    });
+    if (!method) return;
+
+    const typeItem = await vscode.window.showQuickPick(
+        [
+            { label: 'query',    description: 'MediatR query — returns data (SELECT)' },
+            { label: 'command',  description: 'MediatR command — modifies data (INSERT/UPDATE/DELETE)' },
+            { label: 'httpcall', description: 'External HTTP call — no SQL required' },
+        ],
+        { title: 'OpenBase: Specialist (3/4) — Type' }
+    );
+    if (!typeItem) return;
+
+    const needsSql = typeItem.label !== 'httpcall';
+    let sql = '';
+    if (needsSql) {
+        const sqlInput = await vscode.window.showInputBox({
+            title: 'OpenBase: Specialist (4/4) — SQL',
+            prompt: 'SQL statement (use {{paramName}} for parameters)',
+            placeHolder: 'SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}',
+            validateInput: (v) => (!v.trim() ? 'SQL is required' : undefined),
+        });
+        if (!sqlInput) return;
+        sql = sqlInput;
+    }
+
+    const validTypes = PARAM_TYPES.join(', ');
+
+    const params: string[] = [];
+    while (true) {
+        const param = await vscode.window.showInputBox({
+            title: `OpenBase: Specialist — Param ${params.length + 1} (leave empty to finish)`,
+            prompt: `Parameter in name:Type format — valid types: ${validTypes}`,
+            placeHolder: 'paramName:Type  (e.g. categoriaId:Guid)',
+            validateInput: (v) => {
+                if (!v.trim()) return undefined;
+                const parts = v.trim().split(':');
+                if (parts.length !== 2) return 'Format: name:Type (e.g. categoriaId:Guid)';
+                const [, type] = parts;
+                if (!(PARAM_TYPES as readonly string[]).includes(type)) {
+                    return `Unknown type "${type}". Valid: ${validTypes}`;
+                }
+            },
+        });
+        if (param === undefined) return;
+        if (!param.trim()) break;
+        params.push(param.trim());
+    }
+
+    const columns: string[] = [];
+    if (typeItem.label === 'query') {
+        while (true) {
+            const col = await vscode.window.showInputBox({
+                title: `OpenBase: Specialist — Column ${columns.length + 1} (leave empty to finish)`,
+                prompt: `Column in name:Type format — valid types: ${validTypes}`,
+                placeHolder: 'ColumnName:Type  (e.g. Nome:string)',
+                validateInput: (v) => {
+                    if (!v.trim()) return undefined;
+                    const parts = v.trim().split(':');
+                    if (parts.length !== 2) return 'Format: name:Type (e.g. Nome:string)';
+                    const [, type] = parts;
+                    if (!(PARAM_TYPES as readonly string[]).includes(type)) {
+                        return `Unknown type "${type}". Valid: ${validTypes}`;
+                    }
+                },
+            });
+            if (col === undefined) return;
+            if (!col.trim()) break;
+            columns.push(col.trim());
+        }
+    }
+
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
 
-    openTerminal('Specialist', cwd, `openbase specialist -e ${entity}`);
+    const args: string[] = [
+        `-e ${entity}`,
+        `--method ${method}`,
+        `--type ${typeItem.label}`,
+    ];
+    if (sql) args.push(`--sql "${sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+    for (const p of params)  args.push(`--param ${p}`);
+    for (const c of columns) args.push(`--column ${c}`);
+
+    openTerminal('Specialist', cwd, `openbase specialist ${args.join(' ')}`);
 }
 
 // ─── procedure ──────────────────────────────────────────────────────────────
@@ -448,6 +539,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             }
             case 'newProject':   await this._new(msg.data as never, view);          break;
             case 'scaffold':     await this._scaffold(msg.data as never, view);     break;
+            case 'specialist':   await this._specialist(msg.data as never, view);   break;
             case 'procedure':    await this._procedure(msg.data as never, view);    break;
             case 'extensionAdd': await this._extensionAdd(msg.data as never, view); break;
             case 'build':        await this._build(msg.data as never, view);        break;
@@ -502,6 +594,22 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         if (d.table)          args.push(`--table "${d.table}"`);
         if (d.runMigrations)  args.push('--run-migrations');
         await this._exec(`openbase scaffold ${args.join(' ')}`, cwd, view, 'sc', 'OpenBase: Scaffold');
+    }
+
+    private async _specialist(d: { entity: string; method: string; type: string; sql: string; params: string[]; columns: string[] }, view: vscode.WebviewView): Promise<void> {
+        const cwd = await this._cwd();
+        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'sp' }); return; }
+
+        const args: string[] = [
+            `-e ${d.entity}`,
+            `--method ${d.method}`,
+            `--type ${d.type}`,
+        ];
+        if (d.sql) args.push(`--sql "${d.sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+        for (const p of (d.params ?? []))   args.push(`--param ${p}`);
+        for (const c of (d.columns ?? []))  args.push(`--column ${c}`);
+
+        await this._exec(`openbase specialist ${args.join(' ')}`, cwd, view, 'sp', 'OpenBase: Specialist');
     }
 
     private async _procedure(d: { name: string; schema: string }, view: vscode.WebviewView): Promise<void> {
@@ -637,6 +745,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <nav>
     <div class="nav-item active" data-page="new"    onclick="nav(this,'new')">New Project</div>
     <div class="nav-item"        data-page="sc"     onclick="nav(this,'sc')">Scaffold</div>
+    <div class="nav-item"        data-page="sp"     onclick="nav(this,'sp')">Specialist</div>
     <div class="nav-item"        data-page="pr"     onclick="nav(this,'pr')">Procedure</div>
     <div class="nav-item"        data-page="ext"    onclick="nav(this,'ext')">Extension</div>
     <div class="nav-item"        data-page="build"  onclick="nav(this,'build')">Build</div>
@@ -690,6 +799,35 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <p id="sc-cf-hint" class="hint hidden">Um terminal será aberto para a coleta interativa de propriedades.</p>
     <div id="sc-err" class="err"></div>
     <button id="sc-btn" class="btn-primary" onclick="submitScaffold()" data-label="Run Scaffold">Run Scaffold</button>
+  </div>
+
+  <!-- SPECIALIST -->
+  <div id="page-sp" class="page">
+    <div class="field"><label>Entity *</label><input id="sp-entity" type="text" placeholder="Product"></div>
+    <div class="field"><label>Method *</label><input id="sp-method" type="text" placeholder="GetByCategoria"></div>
+    <div class="field"><label>Type</label>
+      <select id="sp-type" onchange="onSpType()">
+        <option value="query">query — MediatR query (SELECT)</option>
+        <option value="command">command — MediatR command (INSERT/UPDATE/DELETE)</option>
+        <option value="httpcall">httpcall — External HTTP call</option>
+      </select>
+    </div>
+    <div id="sp-sql-field" class="field"><label>SQL *</label><input id="sp-sql" type="text" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></div>
+    <hr>
+    <div class="field">
+      <label>Parameters</label>
+      <div id="sp-params"></div>
+      <button class="btn btn-sm" style="margin-top:4px" onclick="addSpRow('sp-params','paramName:Type','e.g. categoriaId:Guid')">+ Add param</button>
+      <p class="hint">Format: name:Type — valid types: string, int, bool, decimal, Guid, DateTime, long, double, float, short</p>
+    </div>
+    <div id="sp-cols-section" class="field">
+      <label>Columns</label>
+      <div id="sp-cols"></div>
+      <button class="btn btn-sm" style="margin-top:4px" onclick="addSpRow('sp-cols','ColumnName:Type','e.g. Nome:string')">+ Add column</button>
+      <p class="hint">Format: name:Type — same type list as above</p>
+    </div>
+    <div id="sp-err" class="err"></div>
+    <button id="sp-btn" class="btn-primary" onclick="submitSpecialist()" data-label="Generate Specialist">Generate Specialist</button>
   </div>
 
   <!-- PROCEDURE -->
@@ -769,6 +907,33 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     function onExtChange() {
       document.getElementById('ext-prov-field').classList.toggle('hidden', document.getElementById('ext-name').value !== 'cache');
     }
+    function onSpType() {
+      var type = document.getElementById('sp-type').value;
+      document.getElementById('sp-sql-field').classList.toggle('hidden', type === 'httpcall');
+      document.getElementById('sp-cols-section').classList.toggle('hidden', type !== 'query');
+    }
+    function addSpRow(containerId, placeholder, title) {
+      var row = document.createElement('div');
+      row.className = 'row';
+      row.style.marginBottom = '4px';
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = placeholder;
+      input.title = title;
+      var btn = document.createElement('button');
+      btn.className = 'btn btn-sm';
+      btn.textContent = '×';
+      btn.onclick = function() { row.remove(); };
+      row.appendChild(input);
+      row.appendChild(btn);
+      document.getElementById(containerId).appendChild(row);
+      input.focus();
+    }
+    function getSpRows(containerId) {
+      return Array.from(document.getElementById(containerId).querySelectorAll('input'))
+        .map(function(i) { return i.value.trim(); })
+        .filter(function(v) { return v; });
+    }
 
     function pickFolder() { vscode.postMessage({ command: 'pickFolder' }); }
 
@@ -835,6 +1000,26 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         schema: document.getElementById('sc-schema').value.trim(),
         table: document.getElementById('sc-table').value.trim(),
         runMigrations: document.getElementById('sc-mig').checked,
+      }});
+    }
+
+    function submitSpecialist() {
+      var entity = document.getElementById('sp-entity').value.trim();
+      var method = document.getElementById('sp-method').value.trim();
+      var type   = document.getElementById('sp-type').value;
+      var sql    = document.getElementById('sp-sql').value.trim();
+      err('sp', '');
+      if (!entity) { err('sp', 'Entity name is required.'); return; }
+      if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('sp', 'Entity must be PascalCase (e.g. Product).'); return; }
+      if (!method) { err('sp', 'Method name is required.'); return; }
+      if (!/^[A-Z][a-zA-Z0-9]*$/.test(method)) { err('sp', 'Method must be PascalCase (e.g. GetByCategoria).'); return; }
+      if (type !== 'httpcall' && !sql) { err('sp', 'SQL is required for query/command types.'); return; }
+      var params  = getSpRows('sp-params');
+      var columns = type === 'query' ? getSpRows('sp-cols') : [];
+      loading('sp', true);
+      vscode.postMessage({ command: 'specialist', data: {
+        entity: entity, method: method, type: type, sql: sql,
+        params: params, columns: columns,
       }});
     }
 
