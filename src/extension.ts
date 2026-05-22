@@ -819,7 +819,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         <option value="httpcall">httpcall — External HTTP call</option>
       </select>
     </div>
-    <div id="sp-sql-field" class="field"><label>SQL *</label><textarea id="sp-sql" rows="5" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></textarea></div>
+    <div id="sp-sql-field" class="field"><label>SQL *</label><textarea id="sp-sql" rows="8" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></textarea></div>
     <hr>
     <div class="field">
       <label>Parameters</label>
