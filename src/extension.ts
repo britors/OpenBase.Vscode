@@ -277,6 +277,7 @@ async function procedure(uri?: vscode.Uri): Promise<void> {
         prompt: 'Schema/owner (leave empty for auto-detect)',
         placeHolder: 'dbo',
     });
+    if (schema === undefined) return;
 
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
@@ -393,8 +394,10 @@ async function history(): Promise<void> {
 
 async function version(): Promise<void> {
     if (!await guardInstalled()) return;
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     try {
-        const output = execSync('openbase version show', { encoding: 'utf-8' }).trim();
+        const output = execSync('openbase version show', { encoding: 'utf-8', env }).trim();
         vscode.window.showInformationMessage(`OpenBase CLI ${output}`);
     } catch {
         vscode.window.showErrorMessage('Could not retrieve OpenBase CLI version.');

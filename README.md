@@ -51,10 +51,10 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 ### New Project
 
 1. Open the Command Palette (`Ctrl+Shift+P`) → **OpenBase: New Project**
-2. Enter the project name
-3. Select the database template (`sqlserver`, `pgsql` or `oracle`)
-4. Select the destination folder (skipped if a single workspace is open)
-5. An integrated terminal opens and runs `openbase new` — follow the prompts to complete configuration
+2. Fill in the project name, database template, server, credentials and optional license keys
+3. Select the destination folder (skipped if a single workspace is open)
+4. The output panel opens and shows the progress of `openbase new`
+5. When done, choose to open the created folder in the current window or a new one
 
 ### Scaffold
 
