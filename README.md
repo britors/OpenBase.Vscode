@@ -41,6 +41,7 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 | `OpenBase: Add Extension` † | Add an extension (JWT, Cache, Health Checks) |
 | `OpenBase: List Extensions` | List available extensions |
 | `OpenBase: Build` | Build the project (Debug or Release) |
+| `OpenBase: Debug` | Build (Debug) and launch the VS Code debugger |
 | `OpenBase: Run` | Run the project |
 | `OpenBase: Update CLI` | Update OpenBase CLI to the latest version |
 | `OpenBase: History` | Show command history |
@@ -61,6 +62,15 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 1. Open the Command Palette → **OpenBase: Scaffold**
 2. Enter the entity name in PascalCase (e.g. `Product`)
 3. The CLI runs interactively in the terminal (code-first or model-first)
+
+### Debug
+
+1. Open the Command Palette → **OpenBase: Debug** (or use the **Debug** tab in the sidebar panel)
+2. Select the configuration (`Debug` or `Release`) and optionally skip the build step
+3. The extension builds the project with `openbase build`, locates the API `.csproj` to resolve the output DLL, then starts the VS Code debugger (`coreclr`)
+4. Breakpoints in the API project are hit normally; the browser opens automatically when the app is ready
+
+> Requires the **C# Dev Kit** or **C# (OmniSharp)** extension installed in VS Code.
 
 ### Add Extension
 
