@@ -1587,7 +1587,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   <textarea id="sql" placeholder="SELECT * FROM ..." spellcheck="false" autofocus></textarea>
 </div>
 <div class="toolbar">
-  <button id="run-btn" class="btn btn-primary">▶ Run</button>
+  <button id="run-btn" class="btn btn-primary" onclick="run()">▶ Run</button>
   <button id="cancel-btn" class="btn btn-cancel hidden">✕ Cancel</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
@@ -1608,9 +1608,11 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
   });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'F8') { e.preventDefault(); run(); }
+  });
 
   document.getElementById('sql').addEventListener('keydown', function(e) {
-    if (e.key === 'F8') { e.preventDefault(); run(); return; }
     if (e.key === 'Tab') {
       e.preventDefault();
       var s = this.selectionStart, end = this.selectionEnd;
@@ -1645,6 +1647,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
 
   window.addEventListener('message', function(e) {
     var m = e.data;
+    if (m.command === 'triggerRun') { run(); return; }
     if (m.command === 'running') {
       running = true; t0 = Date.now();
       document.getElementById('run-btn').classList.add('hidden');
@@ -1934,7 +1937,7 @@ function buildHttpRunnerHtml(baseUrl: string): string {
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
-  <button id="send-btn" class="btn btn-primary">▶ Send</button>
+  <button id="send-btn" class="btn btn-primary" onclick="sendRequest()">▶ Send</button>
 </div>
 
 <!-- REQUEST TABS -->
@@ -2113,6 +2116,7 @@ function buildHttpRunnerHtml(baseUrl: string): string {
   // ── messages ───────────────────────────────────────────────────────
   window.addEventListener('message', function(e) {
     var m = e.data;
+    if (m.command === 'triggerSend') { sendRequest(); return; }
     sending = false;
     document.getElementById('send-btn').disabled = false;
     if (m.command === 'response') showResponse(m);
@@ -2292,6 +2296,8 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.version',        version),
         vscode.commands.registerCommand('openbase.sqlRunner', () => sqlRunner()),
         vscode.commands.registerCommand('openbase.httpRunner', () => httpRunner()),
+        vscode.commands.registerCommand('openbase.sqlRunner.run', () => sqlPanel?.webview.postMessage({ command: 'triggerRun' })),
+        vscode.commands.registerCommand('openbase.httpRunner.send', () => httpPanel?.webview.postMessage({ command: 'triggerSend' })),
     );
 }
 
