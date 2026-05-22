@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.1.7",
+  "version": "10.1.8",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -133,6 +133,28 @@
         "title": "OpenBase: HTTP Runner",
         "category": "OpenBase",
         "icon": "$(globe)"
+      },
+      {
+        "command": "openbase.sqlRunner.run",
+        "title": "OpenBase: Run SQL Query",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.httpRunner.send",
+        "title": "OpenBase: Send HTTP Request",
+        "category": "OpenBase"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "openbase.sqlRunner.run",
+        "key": "f8",
+        "when": "activeWebviewPanelId == 'openbase.sqlRunner'"
+      },
+      {
+        "command": "openbase.httpRunner.send",
+        "key": "f8",
+        "when": "activeWebviewPanelId == 'openbase.httpRunner'"
       }
     ],
     "viewsWelcome": [
