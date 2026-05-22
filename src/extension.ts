@@ -1446,10 +1446,10 @@ let sqlPanel: vscode.WebviewPanel | undefined;
 let sqlProcess: import('child_process').ChildProcess | undefined;
 
 async function sqlRunner(): Promise<void> {
+    if (sqlPanel) { sqlPanel.reveal(vscode.ViewColumn.One); return; }
+
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const conn = cwd ? findConnection(cwd) : undefined;
-
-    if (sqlPanel) { sqlPanel.reveal(vscode.ViewColumn.One); return; }
 
     sqlPanel = vscode.window.createWebviewPanel(
         'openbase.sqlRunner', 'OpenBase SQL', vscode.ViewColumn.One,
@@ -1467,8 +1467,9 @@ async function sqlRunner(): Promise<void> {
         }
 
         if (msg.command === 'saveCsv') {
+            const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             const uri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.file(path.join(cwd ?? os.homedir(), msg.csvName ?? 'query.csv')),
+                defaultUri: vscode.Uri.file(path.join(activeCwd ?? os.homedir(), msg.csvName ?? 'query.csv')),
                 filters: { 'CSV': ['csv'] },
             });
             if (uri && msg.csvData) {
@@ -1481,7 +1482,11 @@ async function sqlRunner(): Promise<void> {
         if (msg.command !== 'run' || !msg.sql?.trim()) return;
         const sql = msg.sql.trim();
 
-        if (!conn) {
+        // Re-detect connection at query time so workspace changes are picked up
+        const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const activeConn = activeCwd ? findConnection(activeCwd) : undefined;
+
+        if (!activeConn) {
             sqlPanel?.webview.postMessage({ command: 'error', text: 'No OpenBase project found in workspace.\nappsettings.json with ConnectionStrings is required.' });
             return;
         }
@@ -1494,29 +1499,29 @@ async function sqlRunner(): Promise<void> {
         let cmd = '';
 
         try {
-            switch (conn.type) {
+            switch (activeConn.type) {
                 case 'sqlserver': {
                     fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                    if (conn.user)     parts.push(`-U "${conn.user}"`);
-                    if (conn.password) parts.push(`-P "${conn.password}"`);
+                    const parts = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
+                    if (activeConn.user)     parts.push(`-U "${activeConn.user}"`);
+                    if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
                     parts.push(`-i "${tmpFile}" -s "|" -W`);
                     cmd = parts.join(' ');
                     break;
                 }
                 case 'pgsql': {
                     fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const port = conn.port ?? '5432';
-                    const user = encodeURIComponent(conn.user ?? 'postgres');
-                    const pass = encodeURIComponent(conn.password ?? '');
-                    const url  = `postgresql://${user}:${pass}@${conn.server}:${port}/${conn.database}`;
+                    const port = activeConn.port ?? '5432';
+                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
+                    const pass = encodeURIComponent(activeConn.password ?? '');
+                    const url  = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
                     cmd = `psql "${url}" --csv -f "${tmpFile}"`;
                     break;
                 }
                 case 'oracle': {
                     const script = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSET FEEDBACK ON\n${sql}\n/\nEXIT\n`;
                     fs.writeFileSync(tmpFile, script, 'utf-8');
-                    cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
                     break;
                 }
             }
@@ -1530,7 +1535,7 @@ async function sqlRunner(): Promise<void> {
                 sqlProcess = child;
             });
 
-            const result = parseSqlOutput(output, conn.type);
+            const result = parseSqlOutput(output, activeConn.type);
             sqlPanel?.webview.postMessage({ command: 'result', ...result });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
@@ -1600,7 +1605,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   <textarea id="sql" placeholder="SELECT * FROM ..." spellcheck="false" autofocus></textarea>
 </div>
 <div class="toolbar">
-  <button id="run-btn" class="btn btn-primary" onclick="run()">▶ Run</button>
+  <button id="run-btn" class="btn btn-primary">▶ Run</button>
   <button id="cancel-btn" class="btn btn-cancel hidden">✕ Cancel</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
@@ -1637,7 +1642,10 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined): string {
   function run() {
     if (running) return;
     var sql = document.getElementById('sql').value.trim();
-    if (!sql) return;
+    if (!sql) {
+      document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
+      return;
+    }
     vscode.postMessage({ command: 'run', sql: sql });
   }
 
