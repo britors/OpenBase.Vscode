@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -46,6 +46,10 @@
           "type": "webview",
           "id": "openbase.sqlrunner.sidebar",
           "name": "SQL Runner"
+        },
+        {
+          "id": "openbase.sqlrunner.tables",
+          "name": "Tables"
         },
         {
           "id": "openbase.sqlrunner.scripts",
@@ -146,6 +150,24 @@
         "command": "openbase.httpRunner.send",
         "title": "OpenBase: Send HTTP Request",
         "category": "OpenBase"
+      },
+      {
+        "command": "openbase.sqlRunner.tables.refresh",
+        "title": "Refresh Tables",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.sqlRunner.tables.select",
+        "title": "SELECT from Table",
+        "category": "OpenBase",
+        "icon": "$(play)"
+      },
+      {
+        "command": "openbase.sqlRunner.tables.inspect",
+        "title": "Inspect Table",
+        "category": "OpenBase",
+        "icon": "$(symbol-class)"
       },
       {
         "command": "openbase.sqlRunner.scripts.refresh",
@@ -255,6 +277,11 @@
           "group": "1_openbase"
         },
         {
+          "command": "openbase.sqlRunner.tables.refresh",
+          "when": "view == openbase.sqlrunner.tables",
+          "group": "navigation"
+        },
+        {
           "command": "openbase.sqlRunner.scripts.new",
           "when": "view == openbase.sqlrunner.scripts",
           "group": "navigation@1"
@@ -286,6 +313,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "openbase.sqlRunner.tables.select",
+          "when": "view == openbase.sqlrunner.tables && viewItem == table",
+          "group": "inline"
+        },
         {
           "command": "openbase.sqlRunner.scripts.open",
           "when": "view == openbase.sqlrunner.scripts && viewItem == script",

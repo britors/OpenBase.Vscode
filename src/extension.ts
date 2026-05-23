@@ -2416,6 +2416,581 @@ class RunnerSidebarProvider implements vscode.WebviewViewProvider {
     }
 }
 
+// ─── SQL table browser ───────────────────────────────────────────────────────
+
+type TableItemKind = 'schema' | 'table' | 'message';
+
+class SqlTableItem extends vscode.TreeItem {
+    constructor(
+        public readonly kind: TableItemKind,
+        label: string,
+        public readonly schema?: string,
+        public readonly dbType?: DbTemplate,
+    ) {
+        const collapsible = kind === 'schema'
+            ? vscode.TreeItemCollapsibleState.Collapsed
+            : vscode.TreeItemCollapsibleState.None;
+        super(label, collapsible);
+        this.contextValue = kind;
+
+        if (kind === 'schema') {
+            this.iconPath = new vscode.ThemeIcon('symbol-namespace');
+        } else if (kind === 'table') {
+            this.iconPath = new vscode.ThemeIcon('table');
+            this.tooltip = `${schema}.${label}`;
+            this.command = {
+                command: 'openbase.sqlRunner.tables.inspect',
+                title: 'Inspect Table',
+                arguments: [this],
+            };
+        } else {
+            this.iconPath = new vscode.ThemeIcon('info');
+        }
+    }
+}
+
+class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    private schemas: Map<string, { tables: string[]; dbType: DbTemplate }> = new Map();
+    private state: 'idle' | 'loading' | 'error' | 'noconn' = 'idle';
+    private errorMsg = '';
+    private treeView?: vscode.TreeView<SqlTableItem>;
+
+    setTreeView(tv: vscode.TreeView<SqlTableItem>): void { this.treeView = tv; }
+
+    async refresh(): Promise<void> {
+        this.schemas.clear();
+        this.state = 'loading';
+        if (this.treeView) this.treeView.message = 'Loading tables…';
+        this._onDidChangeTreeData.fire();
+
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const conn = cwd ? findConnection(cwd) : undefined;
+
+        if (!conn) {
+            this.state = 'noconn';
+            if (this.treeView) this.treeView.message = 'No OpenBase project found in workspace.';
+            this._onDidChangeTreeData.fire();
+            return;
+        }
+
+        try {
+            const data = await loadSqlTables(conn);
+            this.schemas = data;
+            this.state = 'idle';
+            const total = Array.from(data.values()).reduce((s, v) => s + v.tables.length, 0);
+            if (this.treeView) this.treeView.message = total === 0 ? 'No tables found.' : undefined;
+        } catch (e) {
+            this.state = 'error';
+            this.errorMsg = e instanceof Error ? e.message : String(e);
+            if (this.treeView) this.treeView.message = undefined;
+        }
+        this._onDidChangeTreeData.fire();
+    }
+
+    getTreeItem(e: SqlTableItem): vscode.TreeItem { return e; }
+
+    getChildren(element?: SqlTableItem): vscode.ProviderResult<SqlTableItem[]> {
+        if (this.state === 'loading') return [new SqlTableItem('message', 'Loading…')];
+        if (this.state === 'error') return [new SqlTableItem('message', `Error: ${this.errorMsg}`)];
+        if (this.state === 'noconn') return [];
+
+        if (!element) {
+            if (this.schemas.size === 0) return [];
+            return Array.from(this.schemas.entries())
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([schema, { tables }]) => {
+                    const item = new SqlTableItem('schema', `${schema}  (${tables.length})`);
+                    (item as SqlTableItem & { _schema: string })._schema = schema;
+                    return item;
+                });
+        }
+
+        if (element.kind === 'schema') {
+            const schemaName = (element.label as string).replace(/\s+\(\d+\)$/, '');
+            const entry = this.schemas.get(schemaName);
+            if (!entry) return [];
+            return entry.tables.map(t => new SqlTableItem('table', t, schemaName, entry.dbType));
+        }
+        return [];
+    }
+}
+
+async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; dbType: DbTemplate }>> {
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
+    let cmd = '';
+
+    const HEADER_COLS = new Set(['table_schema', 'table_name', 'owner', 'tablename', 'tableschema']);
+
+    try {
+        switch (conn.type) {
+            case 'sqlserver': {
+                const q = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME";
+                fs.writeFileSync(tmpFile, q, 'utf-8');
+                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                if (conn.user)     parts.push(`-U "${conn.user}"`);
+                if (conn.password) parts.push(`-P "${conn.password}"`);
+                parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
+                cmd = parts.join(' ');
+                break;
+            }
+            case 'pgsql': {
+                const q = "SELECT table_schema, table_name FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema') ORDER BY table_schema, table_name";
+                fs.writeFileSync(tmpFile, q, 'utf-8');
+                const port = conn.port ?? '5432';
+                const u = encodeURIComponent(conn.user ?? 'postgres');
+                const p = encodeURIComponent(conn.password ?? '');
+                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                break;
+            }
+            case 'oracle': {
+                const sysTables = `'SYS','SYSTEM','DBSNMP','APPQOSSYS','AUDSYS','CTXSYS','DVSYS','GSMADMIN_INTERNAL','LBACSYS','MDSYS','OLAPSYS','OUTLN','WMSYS','XDB'`;
+                const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT OWNER, TABLE_NAME FROM ALL_TABLES WHERE OWNER NOT IN (${sysTables}) ORDER BY OWNER, TABLE_NAME;\n/\nEXIT\n`;
+                fs.writeFileSync(tmpFile, q, 'utf-8');
+                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                break;
+            }
+        }
+
+        const stdout = await new Promise<string>((resolve, reject) => {
+            exec(cmd, { env, timeout: 15000 }, (err, out, stderr) => {
+                if (err && !out) reject(new Error(stderr || err.message));
+                else resolve(out);
+            });
+        });
+
+        const result = new Map<string, { tables: string[]; dbType: DbTemplate }>();
+        const sep = conn.type === 'pgsql' ? ',' : '|';
+
+        for (const raw of stdout.split('\n')) {
+            const line = raw.trim();
+            if (!line || line.startsWith('---') || /^\d+ rows? selected/i.test(line)) continue;
+            const parts = line.split(sep).map(p => p.replace(/^"|"$/g, '').trim());
+            if (parts.length < 2 || !parts[0] || !parts[1]) continue;
+            if (HEADER_COLS.has(parts[0].toLowerCase())) continue;
+            const schema = parts[0];
+            const table = parts[1];
+            if (!result.has(schema)) result.set(schema, { tables: [], dbType: conn.type });
+            result.get(schema)!.tables.push(table);
+        }
+        return result;
+    } finally {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    }
+}
+
+function buildSelectQuery(schema: string, table: string, dbType: DbTemplate): string {
+    switch (dbType) {
+        case 'sqlserver': return `SELECT TOP 100 *\nFROM [${schema}].[${table}]`;
+        case 'pgsql':     return `SELECT *\nFROM "${schema}"."${table}"\nLIMIT 100`;
+        case 'oracle':    return `SELECT *\nFROM ${schema}.${table}\nWHERE ROWNUM <= 100`;
+    }
+}
+
+// ─── SQL Table Inspector ──────────────────────────────────────────────────────
+
+interface TableColumn {
+    name: string;
+    type: string;
+    size: string;
+    nullable: string;
+    defaultVal: string;
+}
+
+interface TableConstraint {
+    type: string;
+    name: string;
+    column: string;
+    refSchema: string;
+    refTable: string;
+    refColumn: string;
+}
+
+async function loadTableDetails(
+    conn: DbConnection,
+    schema: string,
+    table: string,
+): Promise<{ columns: TableColumn[]; constraints: TableConstraint[] }> {
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const ts = Date.now();
+    const colFile = path.join(os.tmpdir(), `ob_cols_${ts}.sql`);
+    const conFile = path.join(os.tmpdir(), `ob_cons_${ts}.sql`);
+    const s = schema.replace(/'/g, "''");
+    const t = table.replace(/'/g, "''");
+
+    let colCmd = '';
+    let conCmd = '';
+    let sep = '|';
+
+    switch (conn.type) {
+        case 'sqlserver': {
+            const auth = conn.user ? `-U "${conn.user}" -P "${conn.password ?? ''}"` : '';
+            const colQ = `SELECT c.COLUMN_NAME, c.DATA_TYPE, CASE WHEN c.CHARACTER_MAXIMUM_LENGTH IS NOT NULL THEN CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR) WHEN c.NUMERIC_PRECISION IS NOT NULL THEN CAST(c.NUMERIC_PRECISION AS VARCHAR) ELSE '' END AS SZ, c.IS_NULLABLE, ISNULL(c.COLUMN_DEFAULT,'') FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_SCHEMA='${s}' AND c.TABLE_NAME='${t}' ORDER BY c.ORDINAL_POSITION`;
+            const conQ = `SELECT tc.CONSTRAINT_TYPE, tc.CONSTRAINT_NAME, kcu.COLUMN_NAME, ISNULL(ccu.TABLE_SCHEMA,'') AS RS, ISNULL(ccu.TABLE_NAME,'') AS RT, ISNULL(ccu.COLUMN_NAME,'') AS RC FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON tc.CONSTRAINT_NAME=kcu.CONSTRAINT_NAME AND tc.TABLE_SCHEMA=kcu.TABLE_SCHEMA AND tc.TABLE_NAME=kcu.TABLE_NAME LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc ON tc.CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu ON rc.UNIQUE_CONSTRAINT_NAME=ccu.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA='${s}' AND tc.TABLE_NAME='${t}' ORDER BY tc.CONSTRAINT_TYPE, kcu.ORDINAL_POSITION`;
+            fs.writeFileSync(colFile, colQ, 'utf-8');
+            fs.writeFileSync(conFile, conQ, 'utf-8');
+            colCmd = `sqlcmd -S "${conn.server}" -d "${conn.database}" ${auth} -i "${colFile}" -s "|" -W -h -1`;
+            conCmd = `sqlcmd -S "${conn.server}" -d "${conn.database}" ${auth} -i "${conFile}" -s "|" -W -h -1`;
+            break;
+        }
+        case 'pgsql': {
+            sep = ',';
+            const port = conn.port ?? '5432';
+            const u = encodeURIComponent(conn.user ?? 'postgres');
+            const p = encodeURIComponent(conn.password ?? '');
+            const dsn = `postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}`;
+            const colQ = `SELECT column_name, data_type, COALESCE(CAST(character_maximum_length AS VARCHAR), CAST(numeric_precision AS VARCHAR), '') AS sz, is_nullable, COALESCE(column_default,'') FROM information_schema.columns WHERE table_schema='${s}' AND table_name='${t}' ORDER BY ordinal_position`;
+            const conQ = `SELECT tc.constraint_type, tc.constraint_name, kcu.column_name, COALESCE(ccu.table_schema,'') AS rs, COALESCE(ccu.table_name,'') AS rt, COALESCE(ccu.column_name,'') AS rc FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema AND tc.table_name=kcu.table_name LEFT JOIN information_schema.referential_constraints rfk ON tc.constraint_name=rfk.constraint_name LEFT JOIN information_schema.constraint_column_usage ccu ON rfk.unique_constraint_name=ccu.constraint_name WHERE tc.table_schema='${s}' AND tc.table_name='${t}' ORDER BY tc.constraint_type, kcu.ordinal_position`;
+            fs.writeFileSync(colFile, colQ, 'utf-8');
+            fs.writeFileSync(conFile, conQ, 'utf-8');
+            colCmd = `psql "${dsn}" --csv -f "${colFile}"`;
+            conCmd = `psql "${dsn}" --csv -f "${conFile}"`;
+            break;
+        }
+        case 'oracle': {
+            const colQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT COLUMN_NAME, DATA_TYPE, CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END AS SZ, NULLABLE, NVL(TO_CHAR(SUBSTR(DATA_DEFAULT,1,50)),' ') FROM ALL_TAB_COLUMNS WHERE OWNER='${s}' AND TABLE_NAME='${t}' ORDER BY COLUMN_ID;\n/\nEXIT\n`;
+            const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s}' AND uc.TABLE_NAME='${t}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
+            fs.writeFileSync(colFile, colQ, 'utf-8');
+            fs.writeFileSync(conFile, conQ, 'utf-8');
+            colCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
+            conCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${conFile}"`;
+            break;
+        }
+    }
+
+    const runQ = (cmd: string) => new Promise<string>((resolve, reject) => {
+        exec(cmd, { env, timeout: 15000 }, (err, out, stderr) => {
+            if (err && !out) reject(new Error(stderr || err.message));
+            else resolve(out);
+        });
+    });
+
+    try {
+        const [colOut, conOut] = await Promise.all([runQ(colCmd), runQ(conCmd)]);
+
+        const HEADER = new Set(['column_name', 'constraint_type', 'sz', 'owner']);
+
+        const parseRows = (raw: string, minCols: number): string[][] =>
+            raw.split('\n')
+                .map(l => l.trim())
+                .filter(l => l && !l.startsWith('---') && !/^\d+ rows? selected/i.test(l))
+                .map(l => l.split(sep).map(p => p.replace(/^"|"$/g, '').trim()))
+                .filter(p => p.length >= minCols && !HEADER.has(p[0].toLowerCase()));
+
+        const conRows = parseRows(conOut, 3);
+        const constraints: TableConstraint[] = conRows.map(r => {
+            let type = r[0] ?? '';
+            if (type === 'P') type = 'PRIMARY KEY';
+            else if (type === 'R') type = 'FOREIGN KEY';
+            else if (type === 'U') type = 'UNIQUE';
+            else if (type === 'C') type = 'CHECK';
+            return {
+                type,
+                name: r[1] ?? '',
+                column: r[2] ?? '',
+                refSchema: (r[3] ?? '').trim(),
+                refTable: (r[4] ?? '').trim(),
+                refColumn: (r[5] ?? '').trim(),
+            };
+        });
+
+        const columns: TableColumn[] = parseRows(colOut, 5).map(r => ({
+            name: r[0] ?? '',
+            type: r[1] ?? '',
+            size: r[2] ?? '',
+            nullable: conn.type === 'oracle'
+                ? (r[3] === 'N' ? 'NO' : 'YES')
+                : (r[3] ?? ''),
+            defaultVal: r[4] ?? '',
+        }));
+
+        return { columns, constraints };
+    } finally {
+        try { fs.unlinkSync(colFile); } catch { /* ignore */ }
+        try { fs.unlinkSync(conFile); } catch { /* ignore */ }
+    }
+}
+
+function buildTableInspectorHtml(
+    nonce: string,
+    cspSource: string,
+    schema: string,
+    table: string,
+    dbType: DbTemplate,
+    columns: TableColumn[],
+    constraints: TableConstraint[],
+): string {
+    const esc = (s: string) => String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/\x3c/g, '&lt;')
+        .replace(/\x3e/g, '&gt;');
+
+    const pkCols = new Set(constraints.filter(c => c.type === 'PRIMARY KEY').map(c => c.column));
+    const fkCols = new Set(constraints.filter(c => c.type === 'FOREIGN KEY').map(c => c.column));
+
+    const badge = (text: string, cls: string) => `<span class="badge ${cls}">${text}</span>`;
+
+    const dbLabel: Record<DbTemplate, string> = {
+        sqlserver: 'SQL Server', pgsql: 'PostgreSQL', oracle: 'Oracle',
+    };
+
+    const colRows = columns.map(c => {
+        const sz = c.size && c.size !== '0' ? `(${esc(c.size)})` : '';
+        const badges = (pkCols.has(c.name) ? badge('PK', 'pk') : '')
+                     + (fkCols.has(c.name) ? badge('FK', 'fk') : '');
+        const nullCell = (c.nullable === 'NO' || c.nullable === 'N')
+            ? '<span class="not-null">NOT NULL</span>'
+            : '<span class="null">NULL</span>';
+        const defCell = c.defaultVal?.trim()
+            ? `<code class="def">${esc(c.defaultVal)}</code>`
+            : '';
+        return `<tr><td><div class="col-name">${badges}<span>${esc(c.name)}</span></div></td><td class="mono">${esc(c.type)}${sz}</td><td>${nullCell}</td><td>${defCell}</td></tr>`;
+    }).join('');
+
+    const conRows = constraints.map(c => {
+        const typeCell = c.type === 'PRIMARY KEY' ? badge('PK', 'pk') + '&nbsp;Primary Key'
+            : c.type === 'FOREIGN KEY' ? badge('FK', 'fk') + '&nbsp;Foreign Key'
+            : c.type === 'UNIQUE' ? badge('UQ', 'uq') + '&nbsp;Unique'
+            : c.type === 'CHECK' ? badge('CK', 'ck') + '&nbsp;Check'
+            : esc(c.type);
+        const refsCell = c.refTable?.trim()
+            ? `<span class="ref">${esc(c.refSchema)}.${esc(c.refTable)}</span><span class="ref-col">.${esc(c.refColumn)}</span>`
+            : '';
+        return `<tr><td class="con-type">${typeCell}</td><td class="mono small">${esc(c.name)}</td><td class="mono">${esc(c.column)}</td><td>${refsCell}</td></tr>`;
+    }).join('');
+
+    const stats = `${columns.length} column${columns.length !== 1 ? 's' : ''}${
+        constraints.length
+            ? ' &middot; ' + constraints.length + ' constraint' + (constraints.length !== 1 ? 's' : '')
+            : ''}`;
+
+    const conSection = constraints.length > 0 ? `<div class="section">
+  <div class="section-title">Constraints</div>
+  <table>
+    <thead><tr><th>Type</th><th>Name</th><th>Column</th><th>References</th></tr></thead>
+    <tbody>${conRows}</tbody>
+  </table>
+</div>` : '';
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(schema)}.${esc(table)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',-apple-system,sans-serif;font-size:13px}
+.header{background:linear-gradient(135deg,#1a0830 0%,#0d0f1a 100%);border-bottom:1px solid rgba(180,79,255,0.25);padding:16px 20px;position:sticky;top:0;z-index:10}
+.header-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tbl-icon{width:34px;height:34px;background:linear-gradient(135deg,#b44fff,#ff3fa4);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:18px;line-height:1}
+.tbl-meta{flex:1;min-width:0}
+.tbl-name{font-size:18px;font-weight:700;background:linear-gradient(90deg,#b44fff,#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1.2}
+.tbl-schema{font-size:11px;color:#555;font-family:monospace;margin-top:3px}
+.db-badge{background:#1a1040;border:1px solid rgba(180,79,255,0.35);color:#b44fff;font-size:10px;padding:2px 9px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.btn-sel{background:linear-gradient(135deg,#b44fff,#ff3fa4);color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap;flex-shrink:0}
+.btn-sel:hover{opacity:.82}
+.stats{font-size:11px;color:#444;margin-top:8px}
+.section{padding:0 20px 28px}
+.section-title{font-size:10px;font-weight:700;letter-spacing:1.2px;color:#b44fff;text-transform:uppercase;padding:18px 0 10px;border-bottom:1px solid rgba(180,79,255,0.15)}
+table{width:100%;border-collapse:collapse}
+th{background:#120d2e;color:#555;font-size:11px;font-weight:600;letter-spacing:.5px;text-align:left;padding:8px 10px;border-bottom:1px solid rgba(180,79,255,0.15)}
+td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.04);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(180,79,255,0.05)}
+.col-name{display:flex;align-items:center;gap:5px;font-weight:500}
+.badge{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;letter-spacing:.4px;flex-shrink:0}
+.badge.pk{background:rgba(255,215,0,.12);color:#ffd700;border:1px solid rgba(255,215,0,.3)}
+.badge.fk{background:rgba(79,195,247,.12);color:#4fc3f7;border:1px solid rgba(79,195,247,.3)}
+.badge.uq{background:rgba(129,199,132,.12);color:#81c784;border:1px solid rgba(129,199,132,.3)}
+.badge.ck{background:rgba(255,183,77,.12);color:#ffb74d;border:1px solid rgba(255,183,77,.3)}
+.not-null{color:#ff6b6b;font-size:11px}
+.null{color:#333;font-size:11px}
+.mono{font-family:'Cascadia Code','Fira Code',Consolas,monospace;font-size:12px}
+.small{font-size:11px}
+.def{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:1px 5px;border-radius:3px;font-size:11px;font-family:monospace;color:#666;max-width:180px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.con-type{white-space:nowrap}
+.ref{color:#b44fff;font-family:monospace;font-size:12px}
+.ref-col{color:#ff3fa4;font-family:monospace;font-size:12px}
+.empty{color:#444;text-align:center;padding:24px;font-style:italic}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-top">
+    <div class="tbl-icon">&#x1F5C4;</div>
+    <div class="tbl-meta">
+      <div class="tbl-name">${esc(table)}</div>
+      <div class="tbl-schema">${esc(schema)}</div>
+    </div>
+    <span class="db-badge">${esc(dbLabel[dbType])}</span>
+    <button class="btn-sel" id="btn-sel">&#x25B6;&nbsp;SELECT</button>
+  </div>
+  <div class="stats">${stats}</div>
+</div>
+<div class="section">
+  <div class="section-title">Columns</div>
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Default</th></tr></thead>
+    <tbody>${colRows || '<tr><td colspan="4" class="empty">No columns found</td></tr>'}</tbody>
+  </table>
+</div>
+${conSection}
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+document.getElementById('btn-sel').addEventListener('click', function() {
+    vscode.postMessage({ command: 'runSelect' });
+});
+</script>
+</body>
+</html>`;
+}
+
+function buildTableInspectorLoadingHtml(nonce: string, cspSource: string, schema: string, table: string): string {
+    const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/\x3e/g, '&gt;');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
+.spinner{width:30px;height:30px;border:3px solid rgba(180,79,255,.2);border-top-color:#b44fff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.name{background:linear-gradient(90deg,#b44fff,#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
+.lbl{color:#444;font-size:11px}
+</style>
+</head>
+<body>
+<div class="spinner"></div>
+<div class="name">${esc(schema)}.${esc(table)}</div>
+<div class="lbl">Loading table details&hellip;</div>
+</body>
+</html>`;
+}
+
+function buildTableInspectorErrorHtml(nonce: string, cspSource: string, schema: string, table: string, error: string): string {
+    const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/\x3e/g, '&gt;');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px;padding:24px;text-align:center}
+.icon{font-size:30px}
+.name{background:linear-gradient(90deg,#b44fff,#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
+.err{background:#150a0a;border:1px solid rgba(255,107,107,.3);color:#ff6b6b;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:12px;max-width:480px;word-break:break-word}
+</style>
+</head>
+<body>
+<div class="icon">&#x26A0;&#xFE0F;</div>
+<div class="name">${esc(schema)}.${esc(table)}</div>
+<div class="err">${esc(error)}</div>
+</body>
+</html>`;
+}
+
+const tableInspectorPanels = new Map<string, vscode.WebviewPanel>();
+
+async function openTableInspector(
+    conn: DbConnection,
+    schema: string,
+    table: string,
+    dbType: DbTemplate,
+): Promise<void> {
+    const key = `${schema}.${table}`;
+    const existing = tableInspectorPanels.get(key);
+    if (existing) {
+        existing.reveal(vscode.ViewColumn.Two);
+        return;
+    }
+
+    const nonce = getNonce();
+    const panel = vscode.window.createWebviewPanel(
+        'openbase.tableInspector',
+        `${schema}.${table}`,
+        vscode.ViewColumn.Two,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+
+    tableInspectorPanels.set(key, panel);
+    panel.onDidDispose(() => tableInspectorPanels.delete(key));
+
+    panel.webview.html = buildTableInspectorLoadingHtml(nonce, panel.webview.cspSource, schema, table);
+
+    panel.webview.onDidReceiveMessage(async (msg: { command: string }) => {
+        if (msg.command === 'runSelect') {
+            const sql = buildSelectQuery(schema, table, dbType);
+            await openScriptInSqlRunner('', sql);
+        }
+    });
+
+    try {
+        const details = await loadTableDetails(conn, schema, table);
+        panel.webview.html = buildTableInspectorHtml(
+            nonce, panel.webview.cspSource,
+            schema, table, dbType,
+            details.columns, details.constraints,
+        );
+    } catch (e) {
+        panel.webview.html = buildTableInspectorErrorHtml(
+            nonce, panel.webview.cspSource,
+            schema, table,
+            e instanceof Error ? e.message : String(e),
+        );
+    }
+}
+
+let sqlTableProvider: SqlTableTreeProvider | undefined;
+
+function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
+    sqlTableProvider = new SqlTableTreeProvider();
+
+    const treeView = vscode.window.createTreeView('openbase.sqlrunner.tables', {
+        treeDataProvider: sqlTableProvider,
+        showCollapseAll: true,
+    });
+    sqlTableProvider.setTreeView(treeView);
+    context.subscriptions.push(treeView);
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(() => sqlTableProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.refresh',
+            () => sqlTableProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.select',
+            async (item: SqlTableItem) => {
+                if (item.kind !== 'table' || !item.schema || !item.dbType) return;
+                const sql = buildSelectQuery(item.schema, item.label as string, item.dbType);
+                await openScriptInSqlRunner('', sql);
+            }),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.inspect',
+            async (item: SqlTableItem) => {
+                if (item.kind !== 'table' || !item.schema || !item.dbType) return;
+                const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                const conn = cwd ? findConnection(cwd) : undefined;
+                if (!conn) {
+                    vscode.window.showErrorMessage('No database connection found in workspace.');
+                    return;
+                }
+                await openTableInspector(conn, item.schema, item.label as string, item.dbType);
+            }),
+    );
+
+    sqlTableProvider.refresh();
+}
+
 // ─── SQL script library ───────────────────────────────────────────────────────
 
 const SQL_SCRIPTS_SUBDIR = path.join('.openbase', 'sql-runner', 'scripts');
@@ -2481,9 +3056,9 @@ class SqlScriptTreeProvider implements vscode.TreeDataProvider<SqlScriptItem> {
     }
 }
 
-async function openScriptInSqlRunner(filePath: string): Promise<void> {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const name = path.basename(filePath);
+async function openScriptInSqlRunner(filePath: string, directContent?: string): Promise<void> {
+    const content = directContent ?? fs.readFileSync(filePath, 'utf-8');
+    const name = directContent ? '' : path.basename(filePath);
     if (sqlPanel) {
         sqlPanel.reveal(vscode.ViewColumn.One);
         sqlPanel.webview.postMessage({ command: 'loadScript', content, name });
@@ -2761,6 +3336,7 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
 export function activate(context: vscode.ExtensionContext): void {
     panelProvider = new OpenBasePanelProvider();
     setupStatusBar(context);
+    setupSqlTableBrowser(context);
     setupSqlScriptLibrary(context);
     setupHttpRequestLibrary(context);
 
