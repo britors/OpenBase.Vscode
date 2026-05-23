@@ -1498,26 +1498,24 @@ async function sqlRunner(): Promise<void> {
 
 function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSource: string): string {
     const connLabel = (conn?.label ?? 'No connection')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        .replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/\x3e/g, '&gt;');
+    const monacoBase = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs';
     return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net data:; worker-src blob: data:;">
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%;overflow:hidden}
   body{display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
-
   .header{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0}
   .header-title{font-weight:600;font-size:13px}
   .badge{padding:2px 8px;border-radius:3px;font-size:11px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)}
   .badge.warn{background:var(--vscode-inputValidation-warningBackground);color:var(--vscode-inputValidation-warningForeground,#000)}
-
-  .editor-wrap{flex:0 0 200px;display:flex;flex-direction:column;border-bottom:1px solid var(--vscode-panel-border)}
-  textarea{flex:1;width:100%;resize:none;border:none;outline:none;padding:10px 12px;font-family:var(--vscode-editor-font-family,monospace);font-size:var(--vscode-editor-font-size,13px);line-height:1.5;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);tab-size:2}
-  textarea::placeholder{color:var(--vscode-input-placeholderForeground)}
-
+  .editor-wrap{flex:0 0 220px;position:relative;border-bottom:1px solid var(--vscode-panel-border)}
+  #editor{position:absolute;top:0;left:0;right:0;bottom:0}
+  .editor-loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;opacity:.4;pointer-events:none}
   .toolbar{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0;background:var(--vscode-sideBar-background)}
   .btn{padding:4px 10px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
   .btn-primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
@@ -1532,7 +1530,6 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .status{margin-left:auto;font-size:11px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;gap:5px}
   .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
-
   .results{flex:1;overflow:auto}
   .placeholder{padding:20px;color:var(--vscode-descriptionForeground);font-size:12px;font-style:italic}
   .err-box{margin:12px;padding:8px 12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);font-size:12px;white-space:pre-wrap;font-family:monospace}
@@ -1544,8 +1541,6 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   td{padding:4px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 40%,transparent);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
   tr:hover td{background:var(--vscode-list-hoverBackground)}
   td.null{color:var(--vscode-descriptionForeground);font-style:italic}
-
-  /* ── OpenBase brand theme ── */
   :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   .header{background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10))!important;border-bottom:1px solid var(--ob-border)!important}
@@ -1553,8 +1548,6 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .badge{background:rgba(180,79,255,.2)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border)}
   .badge.warn{background:rgba(255,63,164,.15)!important;color:var(--ob-pink)!important;border-color:rgba(255,63,164,.35)!important}
   .editor-wrap{border-bottom:1px solid var(--ob-border)!important}
-  textarea{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
-  textarea::placeholder{color:var(--ob-dim)!important}
   .toolbar{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important}
   .btn-primary{background:linear-gradient(135deg,var(--ob-purple),var(--ob-pink))!important;color:#fff!important;border-radius:4px}
   .btn-primary:hover:not(:disabled){filter:brightness(1.15)}
@@ -1574,6 +1567,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .err-box{background:rgba(255,63,164,.10)!important;border-color:rgba(255,63,164,.35)!important;color:#ff90c0!important}
   .msg-box{background:rgba(180,79,255,.10)!important;border-color:var(--ob-border)!important;color:var(--ob-purple)!important}
   .spinner{border-color:var(--ob-purple)!important;border-top-color:transparent!important}
+  .editor-loading{color:var(--ob-dim)!important}
 </style>
 </head>
 <body>
@@ -1582,42 +1576,42 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <span class="badge ${conn ? '' : 'warn'}">${connLabel}</span>
 </div>
 <div class="editor-wrap">
-  <textarea id="sql" placeholder="SELECT * FROM ..." spellcheck="false"></textarea>
+  <div id="editor"></div>
+  <div class="editor-loading" id="editor-loading">Loading editor&hellip;</div>
 </div>
 <div class="toolbar">
-  <button id="run-btn" class="btn btn-primary">▶ Run</button>
-  <button id="cancel-btn" class="btn btn-cancel hidden">✕ Cancel</button>
-  <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save…</button>
+  <button id="run-btn" class="btn btn-primary">&#x25B6; Run</button>
+  <button id="cancel-btn" class="btn btn-cancel hidden">&#x2715; Cancel</button>
+  <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save&hellip;</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
 <div id="results" class="results">
   <p class="placeholder">Write a query above and press Run or F8</p>
 </div>
-
+<script src="${monacoBase}/loader.js"></script>
 <script nonce="${nonce}">
-  window.onerror = function(msg, src, line, col, err) {
+  window.onerror = function(msg, src, line, col) {
     var box = document.createElement('div');
     box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#c72e0f;color:#fff;padding:6px 10px;font-size:12px;font-family:monospace;z-index:9999;white-space:pre-wrap';
     box.textContent = 'JS ERROR: ' + msg + '\\n' + src + ':' + line + ':' + col;
     document.body.appendChild(box);
   };
-  console.log('[SQL Runner] webview script loaded');
-  const vscode = acquireVsCodeApi();
-  vscode.postMessage({ command: 'ready' });
-  let running = false, t0 = 0;
-  let lastColumns = [], lastRows = [];
-  let runTimeoutId = null;
+  var vscode = acquireVsCodeApi();
+  var running = false, t0 = 0;
+  var lastColumns = [], lastRows = [];
+  var runTimeoutId = null;
+  var editor = null;
+  var pendingLoad = null;
 
   document.getElementById('run-btn').addEventListener('click', run);
-  document.getElementById('save-btn').addEventListener('click', function() {
-    var sql = document.getElementById('sql').value;
-    if (sql.trim()) vscode.postMessage({ command: 'saveScript', sql: sql });
-  });
-  console.log('[SQL Runner] run-btn listener attached');
   document.getElementById('cancel-btn').addEventListener('click', function() {
     clearRunTimeout();
     vscode.postMessage({ command: 'cancel' });
+  });
+  document.getElementById('save-btn').addEventListener('click', function() {
+    var sql = editor ? editor.getValue() : '';
+    if (sql.trim()) vscode.postMessage({ command: 'saveScript', sql: sql });
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
@@ -1626,13 +1620,79 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     if (e.key === 'F8') { e.preventDefault(); run(); }
   });
 
-  document.getElementById('sql').addEventListener('keydown', function(e) {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      var s = this.selectionStart, end = this.selectionEnd;
-      this.value = this.value.substring(0, s) + '  ' + this.value.substring(end);
-      this.selectionStart = this.selectionEnd = s + 2;
+  window.MonacoEnvironment = {
+    getWorkerUrl: function() {
+      return 'data:text/javascript;charset=utf-8,' + encodeURIComponent('self.onmessage=function(){};');
     }
+  };
+  require.config({ paths: { vs: '${monacoBase}' } });
+  require(['vs/editor/editor.main'], function() {
+    monaco.editor.defineTheme('openbase-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'keyword.sql',  foreground: 'c084fc', fontStyle: 'bold' },
+        { token: 'keyword',      foreground: 'c084fc', fontStyle: 'bold' },
+        { token: 'string.sql',   foreground: 'f472b6' },
+        { token: 'string',       foreground: 'f472b6' },
+        { token: 'number',       foreground: '67e8f9' },
+        { token: 'comment',      foreground: '4b3f6b', fontStyle: 'italic' },
+        { token: 'operator',     foreground: 'e879f9' },
+        { token: 'identifier',   foreground: 'ede8f8' },
+        { token: 'predefined',   foreground: 'a78bfa' },
+      ],
+      colors: {
+        'editor.background':                   '#0d0f1a',
+        'editor.foreground':                   '#ede8f8',
+        'editor.lineHighlightBackground':      '#1c153528',
+        'editor.selectionBackground':          '#b44fff33',
+        'editor.inactiveSelectionBackground':  '#b44fff1a',
+        'editorLineNumber.foreground':         '#3d3060',
+        'editorLineNumber.activeForeground':   '#b44fff',
+        'editorCursor.foreground':             '#b44fff',
+        'editorIndentGuide.background1':       '#1c1535',
+        'editorIndentGuide.activeBackground1': '#b44fff44',
+        'editorWidget.background':             '#131629',
+        'editorWidget.border':                 '#b44fff44',
+        'editorSuggestWidget.background':      '#131629',
+        'editorSuggestWidget.border':          '#b44fff44',
+        'editorSuggestWidget.selectedBackground': '#1c1535',
+        'editorSuggestWidget.foreground':      '#ede8f8',
+        'scrollbarSlider.background':          '#b44fff22',
+        'scrollbarSlider.hoverBackground':     '#b44fff44',
+        'scrollbarSlider.activeBackground':    '#b44fff66',
+        'editorGutter.background':             '#0d0f1a',
+      }
+    });
+    editor = monaco.editor.create(document.getElementById('editor'), {
+      value: '',
+      language: 'sql',
+      theme: 'openbase-dark',
+      minimap: { enabled: false },
+      fontSize: 13,
+      lineNumbers: 'on',
+      automaticLayout: true,
+      wordWrap: 'off',
+      scrollBeyondLastLine: false,
+      renderLineHighlight: 'line',
+      padding: { top: 10, bottom: 10 },
+      quickSuggestions: true,
+      suggestOnTriggerCharacters: true,
+      folding: true,
+      tabSize: 2,
+      insertSpaces: true,
+      overviewRulerLanes: 0,
+      scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+      contextmenu: false,
+    });
+    editor.addCommand(monaco.KeyCode.F8, function() { run(); });
+    document.getElementById('editor-loading').style.display = 'none';
+    if (pendingLoad !== null) {
+      editor.setValue(pendingLoad);
+      editor.setPosition({ lineNumber: 1, column: 1 });
+      pendingLoad = null;
+    }
+    vscode.postMessage({ command: 'ready' });
   });
 
   function clearRunTimeout() {
@@ -1640,25 +1700,19 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   }
 
   function run() {
-    console.log('[SQL Runner] run() called, running=' + running);
-    if (running) { console.log('[SQL Runner] already running, returning'); return; }
-    var sqlEl = document.getElementById('sql');
-    var sql = sqlEl ? sqlEl.value.trim() : '';
-    console.log('[SQL Runner] sql length=' + sql.length);
+    if (running) return;
+    var sql = editor ? editor.getValue().trim() : '';
     if (!sql) {
       document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
       return;
     }
-
     running = true;
     t0 = Date.now();
     document.getElementById('run-btn').classList.add('hidden');
     document.getElementById('cancel-btn').classList.remove('hidden');
     document.getElementById('results').innerHTML = '';
-    setStatus('<span class="spinner"></span> Sending\u2026');
-
+    setStatus('<span class="spinner"></span> Sending…');
     runTimeoutId = setTimeout(function() {
-      console.log('[SQL Runner] client timeout fired');
       running = false;
       document.getElementById('run-btn').classList.remove('hidden');
       document.getElementById('cancel-btn').classList.add('hidden');
@@ -1666,17 +1720,13 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       document.getElementById('results').innerHTML =
         '<div class="err-box">Extension did not respond after 10s.\\nMake sure an OpenBase project with appsettings.json is open in the workspace.</div>';
     }, 10000);
-
-    console.log('[SQL Runner] posting run message to extension');
     vscode.postMessage({ command: 'run', sql: sql });
   }
 
   function exportCsv() {
     if (!lastColumns.length) return;
     var lines = [lastColumns.map(csvCell).join(',')];
-    for (var r = 0; r < lastRows.length; r++) {
-      lines.push(lastRows[r].map(csvCell).join(','));
-    }
+    for (var r = 0; r < lastRows.length; r++) lines.push(lastRows[r].map(csvCell).join(','));
     var csv = lines.join('\\r\\n');
     var name = 'query_' + new Date().toISOString().slice(0,19).replace(/[T:]/g,'-') + '.csv';
     vscode.postMessage({ command: 'saveCsv', csvData: csv, csvName: name });
@@ -1690,10 +1740,14 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 
   window.addEventListener('message', function(e) {
     var m = e.data;
-    console.log('[SQL Runner] message from extension: ' + m.command);
     if (m.command === 'triggerRun') { run(); return; }
     if (m.command === 'loadScript') {
-      document.getElementById('sql').value = m.content || '';
+      if (editor) {
+        editor.setValue(m.content || '');
+        editor.setPosition({ lineNumber: 1, column: 1 });
+      } else {
+        pendingLoad = m.content || '';
+      }
       document.getElementById('results').innerHTML = '<p class="placeholder">Write a query above and press Run or F8</p>';
       lastColumns = []; lastRows = [];
       return;
@@ -1708,7 +1762,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     clearRunTimeout();
     if (m.command === 'running') {
       running = true; t0 = Date.now();
-      setStatus('<span class="spinner"></span> Running\u2026');
+      setStatus('<span class="spinner"></span> Running…');
     } else if (m.command === 'result') {
       running = false;
       document.getElementById('run-btn').classList.remove('hidden');
@@ -1736,21 +1790,18 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     setStatus('');
     lastColumns = columns || [];
     lastRows = rows || [];
-
     if (!columns || !columns.length) {
       lastColumns = []; lastRows = [];
       document.getElementById('results').innerHTML =
         '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
       return;
     }
-
     var rowCount = rows ? rows.length : 0;
-    var infoMsg  = message ? ' \u00b7 ' + esc(message) : '';
-    var hdr  = '<div class="result-header">'
-             + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' \u00b7 ' + elapsed + infoMsg + '</span>'
-             + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
-             + '</div>';
-
+    var infoMsg = message ? ' · ' + esc(message) : '';
+    var hdr = '<div class="result-header">'
+            + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' · ' + elapsed + infoMsg + '</span>'
+            + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
+            + '</div>';
     var tbl = '<table><thead><tr>';
     for (var i = 0; i < columns.length; i++) tbl += '<th>' + esc(columns[i]) + '</th>';
     tbl += '</tr></thead><tbody>';
@@ -1765,7 +1816,6 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       tbl += '</tr>';
     }
     tbl += '</tbody></table>';
-
     var wrap = document.createElement('div');
     wrap.style.cssText = 'display:flex;flex-direction:column;height:100%';
     wrap.innerHTML = hdr + '<div style="flex:1;overflow:auto">' + tbl + '</div>';
