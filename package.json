@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.2",
+  "version": "1.3.3",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -46,6 +46,10 @@
           "type": "webview",
           "id": "openbase.sqlrunner.sidebar",
           "name": "SQL Runner"
+        },
+        {
+          "id": "openbase.sqlrunner.scripts",
+          "name": "Scripts"
         }
       ],
       "openbase-httprunner": [
@@ -143,6 +147,41 @@
         "command": "openbase.httpRunner.send",
         "title": "OpenBase: Send HTTP Request",
         "category": "OpenBase"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.refresh",
+        "title": "Refresh Scripts",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.new",
+        "title": "New SQL Script",
+        "category": "OpenBase",
+        "icon": "$(add)"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.newFolder",
+        "title": "New Folder",
+        "category": "OpenBase",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.open",
+        "title": "Open in SQL Runner",
+        "category": "OpenBase",
+        "icon": "$(play)"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.rename",
+        "title": "Rename",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.sqlRunner.scripts.delete",
+        "title": "Delete",
+        "category": "OpenBase",
+        "icon": "$(trash)"
       }
     ],
     "keybindings": [
@@ -180,6 +219,48 @@
           "command": "openbase.specialist",
           "when": "view == openbase.panel",
           "group": "1_openbase"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.new",
+          "when": "view == openbase.sqlrunner.scripts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.newFolder",
+          "when": "view == openbase.sqlrunner.scripts",
+          "group": "navigation@2"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.refresh",
+          "when": "view == openbase.sqlrunner.scripts",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "openbase.sqlRunner.scripts.open",
+          "when": "view == openbase.sqlrunner.scripts && viewItem == script",
+          "group": "inline"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.new",
+          "when": "view == openbase.sqlrunner.scripts && viewItem == folder",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.newFolder",
+          "when": "view == openbase.sqlrunner.scripts && viewItem == folder",
+          "group": "1_edit@2"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.rename",
+          "when": "view == openbase.sqlrunner.scripts",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "openbase.sqlRunner.scripts.delete",
+          "when": "view == openbase.sqlrunner.scripts",
+          "group": "2_edit@2"
         }
       ],
       "explorer/context": [
