@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import { execSync, exec, spawn } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
@@ -1147,7 +1149,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       input.title = title;
       var btn = document.createElement('button');
       btn.className = 'btn btn-sm';
-      btn.textContent = '×';
+      btn.textContent = '\u00d7';
       btn.onclick = function() { row.remove(); };
       row.appendChild(input);
       row.appendChild(btn);
@@ -1176,7 +1178,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       var btn = document.getElementById(ctx + '-btn');
       if (!btn) return;
       btn.disabled = on;
-      btn.textContent = on ? 'Running…' : (btn.dataset.label || btn.textContent);
+      btn.textContent = on ? 'Running\u2026' : (btn.dataset.label || btn.textContent);
       if (on) { ok(ctx, ''); err(ctx, ''); }
     }
 
@@ -1335,16 +1337,1070 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     }
 }
 
+// ─── sql runner ──────────────────────────────────────────────────────────────
+
+interface DbConnection {
+    type: 'sqlserver' | 'pgsql' | 'oracle';
+    label: string;
+    server: string;
+    database: string;
+    user?: string;
+    password?: string;
+    port?: string;
+}
+
+function parseConnectionString(cs: string): DbConnection | undefined {
+    const get = (...keys: string[]): string | undefined => {
+        for (const k of keys) {
+            const m = cs.match(new RegExp(`(?:^|;)\\s*${k.replace(/\s/g, '\\s*')}\\s*=\\s*([^;]+)`, 'i'));
+            if (m) return m[1].trim();
+        }
+    };
+
+    if (/(?:^|;)\s*Host\s*=/i.test(cs) || /(?:^|;)\s*Username\s*=/i.test(cs)) {
+        const server   = get('Host', 'Server') ?? 'localhost';
+        const database = get('Database') ?? '';
+        return { type: 'pgsql', label: `pgsql · ${database}`, server, database,
+            user: get('Username', 'User Id'), password: get('Password'), port: get('Port') };
+    }
+
+    const ds = get('Data Source', 'DataSource');
+    if (ds && /[/@]/.test(ds) && !/^\./.test(ds) && !/\\/.test(ds)) {
+        return { type: 'oracle', label: `oracle · ${ds}`, server: ds, database: ds,
+            user: get('User Id', 'User', 'UID'), password: get('Password', 'PWD') };
+    }
+
+    const server   = get('Server', 'Data Source', 'DataSource') ?? '.';
+    const database = get('Database', 'Initial Catalog') ?? '';
+    return { type: 'sqlserver', label: `sqlserver · ${database}`, server, database,
+        user: get('User Id', 'UID'), password: get('Password', 'PWD') };
+}
+
+function findConnection(cwd: string): DbConnection | undefined {
+    function scan(dir: string, depth: number): string | undefined {
+        if (depth > 4) return undefined;
+        for (const name of ['appsettings.Development.json', 'appsettings.json']) {
+            const p = path.join(dir, name);
+            if (fs.existsSync(p)) return p;
+        }
+        try {
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+                    const found = scan(path.join(dir, e.name), depth + 1);
+                    if (found) return found;
+                }
+            }
+        } catch { /* ignore */ }
+    }
+
+    const file = scan(cwd, 0);
+    if (!file) return undefined;
+    try {
+        const json = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        const cs = json?.ConnectionStrings?.DefaultConnection
+            ?? json?.ConnectionStrings?.Connection
+            ?? (Object.values(json?.ConnectionStrings ?? {}) as string[])[0];
+        if (typeof cs === 'string') return parseConnectionString(cs);
+    } catch { /* ignore */ }
+}
+
+function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: string[]; rows: string[][]; message?: string } {
+    const lines = raw.split('\n').map(l => l.trimEnd()).filter(Boolean);
+
+    if (type === 'pgsql') {
+        if (!lines.length) return { columns: [], rows: [] };
+        const nonTable = lines.find(l => /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|DO)\b/i.test(l));
+        if (nonTable) return { columns: [], rows: [], message: lines.join('\n') };
+        const parseCSV = (line: string): string[] => {
+            const res: string[] = []; let cur = ''; let inQ = false;
+            for (const ch of line) {
+                if (ch === '"') { inQ = !inQ; continue; }
+                if (ch === ',' && !inQ) { res.push(cur); cur = ''; continue; }
+                cur += ch;
+            }
+            res.push(cur); return res;
+        };
+        const [header, ...rest] = lines;
+        return { columns: parseCSV(header), rows: rest.map(parseCSV) };
+    }
+
+    if (type === 'sqlserver') {
+        const affected = lines.find(l => /^\(\d+ rows? affected\)/i.test(l));
+        const dataLines = lines.filter(l => !/^[-| ]+$/.test(l) && !/^\(\d+ rows? affected\)/i.test(l));
+        if (!dataLines.length) return { columns: [], rows: [], message: affected ?? 'Command completed.' };
+        const columns = dataLines[0].split('|').map(c => c.trim()).filter(Boolean);
+        const rows = dataLines.slice(1).map(l => l.split('|').map(c => c.trim()));
+        return { columns, rows, message: affected };
+    }
+
+    // oracle
+    const dataLines = lines.filter(l => !/^[-]+$/.test(l) && !/^\d+ rows? selected/i.test(l) && !/^Disconnected/.test(l));
+    if (!dataLines.length) return { columns: [], rows: [], message: lines.join('\n') };
+    if (!dataLines[0].includes('|')) return { columns: [], rows: [], message: lines.join('\n') };
+    const columns = dataLines[0].split('|').map(c => c.trim()).filter(Boolean);
+    const rows = dataLines.slice(1).map(l => l.split('|').map(c => c.trim()));
+    return { columns, rows };
+}
+
+function getNonce(): string {
+    let text = '';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) text += chars.charAt(Math.floor(Math.random() * chars.length));
+    return text;
+}
+
+let sqlPanel: vscode.WebviewPanel | undefined;
+let sqlProcess: import('child_process').ChildProcess | undefined;
+let sqlLog: vscode.OutputChannel | undefined;
+
+function sqlOut(): vscode.OutputChannel {
+    if (!sqlLog) sqlLog = vscode.window.createOutputChannel('OpenBase SQL Runner (Debug)');
+    return sqlLog;
+}
+
+async function sqlRunner(): Promise<void> {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const conn = cwd ? findConnection(cwd) : undefined;
+
+    if (sqlPanel) {
+        sqlPanel.reveal(vscode.ViewColumn.One);
+        const sqlNonce = getNonce();
+        sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
+        return;
+    }
+
+    sqlOut().appendLine(`[SQL Runner] Opening panel. cwd=${cwd ?? '(none)'}`);
+    sqlOut().appendLine(`[SQL Runner] Connection detected: ${conn ? conn.label : '(none)'}`);
+
+    sqlPanel = vscode.window.createWebviewPanel(
+        'openbase.sqlRunner', 'OpenBase SQL', vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true }
+    );
+    sqlPanel.onDidDispose(() => { sqlPanel = undefined; sqlOut().appendLine('[SQL Runner] Panel disposed.'); });
+    const sqlNonce = getNonce();
+    sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
+
+    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string }) => {
+        sqlOut().appendLine(`[SQL Runner] Message received: ${msg.command}`);
+
+        if (msg.command === 'cancel') {
+            sqlProcess?.kill();
+            sqlProcess = undefined;
+            sqlPanel?.webview.postMessage({ command: 'cancelled' });
+            return;
+        }
+
+        if (msg.command === 'saveCsv') {
+            const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(activeCwd ?? os.homedir(), msg.csvName ?? 'query.csv')),
+                filters: { 'CSV': ['csv'] },
+            });
+            if (uri && msg.csvData) {
+                fs.writeFileSync(uri.fsPath, msg.csvData, 'utf-8');
+                vscode.window.showInformationMessage(`Saved: ${uri.fsPath}`);
+            }
+            return;
+        }
+
+        if (msg.command !== 'run' || !msg.sql?.trim()) {
+            sqlOut().appendLine(`[SQL Runner] Ignored message: command=${msg.command}, sql empty=${!msg.sql?.trim()}`);
+            return;
+        }
+        const sql = msg.sql.trim();
+
+        const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        sqlOut().appendLine(`[SQL Runner] Run requested. activeCwd=${activeCwd ?? '(none)'}`);
+
+        const activeConn = activeCwd ? findConnection(activeCwd) : undefined;
+        sqlOut().appendLine(`[SQL Runner] Active connection: ${activeConn ? activeConn.label + ' type=' + activeConn.type : '(none)'}`);
+
+        if (!activeConn) {
+            sqlOut().appendLine('[SQL Runner] No connection — sending error to webview.');
+            sqlPanel?.webview.postMessage({ command: 'error', text: 'No OpenBase project found in workspace.\nappsettings.json with ConnectionStrings is required.' });
+            return;
+        }
+
+        sqlPanel?.webview.postMessage({ command: 'running' });
+        sqlOut().appendLine('[SQL Runner] Sent "running" to webview.');
+
+        const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        let cmd = '';
+
+        try {
+            switch (activeConn.type) {
+                case 'sqlserver': {
+                    fs.writeFileSync(tmpFile, sql, 'utf-8');
+                    const parts = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
+                    if (activeConn.user)     parts.push(`-U "${activeConn.user}"`);
+                    if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
+                    parts.push(`-i "${tmpFile}" -s "|" -W`);
+                    cmd = parts.join(' ');
+                    break;
+                }
+                case 'pgsql': {
+                    fs.writeFileSync(tmpFile, sql, 'utf-8');
+                    const port = activeConn.port ?? '5432';
+                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
+                    const pass = encodeURIComponent(activeConn.password ?? '');
+                    const url  = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
+                    cmd = `psql "${url}" --csv -f "${tmpFile}"`;
+                    break;
+                }
+                case 'oracle': {
+                    const script = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSET FEEDBACK ON\n${sql}\n/\nEXIT\n`;
+                    fs.writeFileSync(tmpFile, script, 'utf-8');
+                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
+                    break;
+                }
+            }
+
+            sqlOut().appendLine(`[SQL Runner] Executing: ${cmd.replace(/(-P\s*")[^"]*"/, '-P "***"')}`);
+
+            const output = await new Promise<string>((resolve, reject) => {
+                const child = exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
+                    sqlProcess = undefined;
+                    sqlOut().appendLine(`[SQL Runner] exec done. err=${err?.message ?? 'none'} stdout=${stdout.length}b stderr=${stderr.length}b`);
+                    if (err && !stdout) reject(new Error(stderr || err.message));
+                    else resolve(stdout + (stderr ? '\n' + stderr : ''));
+                });
+                sqlProcess = child;
+            });
+
+            const result = parseSqlOutput(output, activeConn.type);
+            sqlOut().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
+            sqlPanel?.webview.postMessage({ command: 'result', ...result });
+        } catch (e: unknown) {
+            const text = e instanceof Error ? e.message : String(e);
+            sqlOut().appendLine(`[SQL Runner] Error: ${text}`);
+            sqlPanel?.webview.postMessage({ command: 'error', text });
+        } finally {
+            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+        }
+    });
+}
+
+function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSource: string): string {
+    const connLabel = (conn?.label ?? 'No connection')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
+
+  .header{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0}
+  .header-title{font-weight:600;font-size:13px}
+  .badge{padding:2px 8px;border-radius:3px;font-size:11px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)}
+  .badge.warn{background:var(--vscode-inputValidation-warningBackground);color:var(--vscode-inputValidation-warningForeground,#000)}
+
+  .editor-wrap{flex:0 0 200px;display:flex;flex-direction:column;border-bottom:1px solid var(--vscode-panel-border)}
+  textarea{flex:1;width:100%;resize:none;border:none;outline:none;padding:10px 12px;font-family:var(--vscode-editor-font-family,monospace);font-size:var(--vscode-editor-font-size,13px);line-height:1.5;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);tab-size:2}
+  textarea::placeholder{color:var(--vscode-input-placeholderForeground)}
+
+  .toolbar{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0;background:var(--vscode-sideBar-background)}
+  .btn{padding:4px 10px;border:none;cursor:pointer;font-family:inherit;font-size:inherit}
+  .btn-primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
+  .btn-primary:hover{background:var(--vscode-button-hoverBackground)}
+  .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+  .btn-secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
+  .btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}
+  .btn-cancel{background:var(--vscode-statusBarItem-errorBackground,#c72e0f);color:#fff}
+  .btn-cancel:hover{opacity:.85}
+  .hidden{display:none!important}
+  .hint{font-size:11px;color:var(--vscode-descriptionForeground)}
+  .status{margin-left:auto;font-size:11px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;gap:5px}
+  .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .results{flex:1;overflow:auto}
+  .placeholder{padding:20px;color:var(--vscode-descriptionForeground);font-size:12px;font-style:italic}
+  .err-box{margin:12px;padding:8px 12px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);font-size:12px;white-space:pre-wrap;font-family:monospace}
+  .msg-box{margin:12px;padding:8px 12px;background:var(--vscode-inputValidation-infoBackground);border:1px solid var(--vscode-inputValidation-infoBorder);font-size:12px;white-space:pre-wrap;font-family:monospace}
+  .result-header{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--vscode-descriptionForeground);border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background);flex-shrink:0}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead{position:sticky;top:0;background:var(--vscode-editor-background);z-index:1}
+  th{text-align:left;padding:5px 10px;border-bottom:2px solid var(--vscode-panel-border);font-weight:600;white-space:nowrap}
+  td{padding:4px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 40%,transparent);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
+  tr:hover td{background:var(--vscode-list-hoverBackground)}
+  td.null{color:var(--vscode-descriptionForeground);font-style:italic}
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="header-title">OpenBase SQL</span>
+  <span class="badge ${conn ? '' : 'warn'}">${connLabel}</span>
+</div>
+<div class="editor-wrap">
+  <textarea id="sql" placeholder="SELECT * FROM ..." spellcheck="false"></textarea>
+</div>
+<div class="toolbar">
+  <button id="run-btn" class="btn btn-primary">▶ Run</button>
+  <button id="cancel-btn" class="btn btn-cancel hidden">✕ Cancel</button>
+  <span class="hint">F8 to run</span>
+  <span id="status" class="status"></span>
+</div>
+<div id="results" class="results">
+  <p class="placeholder">Write a query above and press Run or F8</p>
+</div>
+
+<script nonce="${nonce}">
+  window.onerror = function(msg, src, line, col, err) {
+    var box = document.createElement('div');
+    box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#c72e0f;color:#fff;padding:6px 10px;font-size:12px;font-family:monospace;z-index:9999;white-space:pre-wrap';
+    box.textContent = 'JS ERROR: ' + msg + '\\n' + src + ':' + line + ':' + col;
+    document.body.appendChild(box);
+  };
+  console.log('[SQL Runner] webview script loaded');
+  const vscode = acquireVsCodeApi();
+  let running = false, t0 = 0;
+  let lastColumns = [], lastRows = [];
+  let runTimeoutId = null;
+
+  document.getElementById('run-btn').addEventListener('click', run);
+  console.log('[SQL Runner] run-btn listener attached');
+  document.getElementById('cancel-btn').addEventListener('click', function() {
+    clearRunTimeout();
+    vscode.postMessage({ command: 'cancel' });
+  });
+  document.getElementById('results').addEventListener('click', function(e) {
+    if (e.target && e.target.id === 'export-csv-btn') exportCsv();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'F8') { e.preventDefault(); run(); }
+  });
+
+  document.getElementById('sql').addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var s = this.selectionStart, end = this.selectionEnd;
+      this.value = this.value.substring(0, s) + '  ' + this.value.substring(end);
+      this.selectionStart = this.selectionEnd = s + 2;
+    }
+  });
+
+  function clearRunTimeout() {
+    if (runTimeoutId) { clearTimeout(runTimeoutId); runTimeoutId = null; }
+  }
+
+  function run() {
+    console.log('[SQL Runner] run() called, running=' + running);
+    if (running) { console.log('[SQL Runner] already running, returning'); return; }
+    var sqlEl = document.getElementById('sql');
+    var sql = sqlEl ? sqlEl.value.trim() : '';
+    console.log('[SQL Runner] sql length=' + sql.length);
+    if (!sql) {
+      document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
+      return;
+    }
+
+    running = true;
+    t0 = Date.now();
+    document.getElementById('run-btn').classList.add('hidden');
+    document.getElementById('cancel-btn').classList.remove('hidden');
+    document.getElementById('results').innerHTML = '';
+    setStatus('<span class="spinner"></span> Sending\u2026');
+
+    runTimeoutId = setTimeout(function() {
+      console.log('[SQL Runner] client timeout fired');
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      document.getElementById('results').innerHTML =
+        '<div class="err-box">Extension did not respond after 10s.\\nMake sure an OpenBase project with appsettings.json is open in the workspace.</div>';
+    }, 10000);
+
+    console.log('[SQL Runner] posting run message to extension');
+    vscode.postMessage({ command: 'run', sql: sql });
+  }
+
+  function exportCsv() {
+    if (!lastColumns.length) return;
+    var lines = [lastColumns.map(csvCell).join(',')];
+    for (var r = 0; r < lastRows.length; r++) {
+      lines.push(lastRows[r].map(csvCell).join(','));
+    }
+    var csv = lines.join('\\r\\n');
+    var name = 'query_' + new Date().toISOString().slice(0,19).replace(/[T:]/g,'-') + '.csv';
+    vscode.postMessage({ command: 'saveCsv', csvData: csv, csvName: name });
+  }
+
+  function csvCell(v) {
+    var s = v == null ? '' : String(v);
+    if (s.includes(',') || s.includes('"') || s.includes('\\n')) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  window.addEventListener('message', function(e) {
+    var m = e.data;
+    console.log('[SQL Runner] message from extension: ' + m.command);
+    if (m.command === 'triggerRun') { run(); return; }
+    if (m.command === 'reset') {
+      running = false; clearRunTimeout();
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      return;
+    }
+    clearRunTimeout();
+    if (m.command === 'running') {
+      running = true; t0 = Date.now();
+      setStatus('<span class="spinner"></span> Running\u2026');
+    } else if (m.command === 'result') {
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      var elapsed = ((Date.now() - t0) / 1000).toFixed(2) + 's';
+      renderResult(m.columns, m.rows, m.message, elapsed);
+    } else if (m.command === 'error') {
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML = '<div class="err-box">' + esc(m.text) + '</div>';
+    } else if (m.command === 'cancelled') {
+      running = false;
+      document.getElementById('run-btn').classList.remove('hidden');
+      document.getElementById('cancel-btn').classList.add('hidden');
+      setStatus('');
+      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML = '<div class="msg-box">Query cancelled.</div>';
+    }
+  });
+
+  function renderResult(columns, rows, message, elapsed) {
+    setStatus('');
+    lastColumns = columns || [];
+    lastRows = rows || [];
+
+    if (!columns || !columns.length) {
+      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML =
+        '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
+      return;
+    }
+
+    var rowCount = rows ? rows.length : 0;
+    var infoMsg  = message ? ' \u00b7 ' + esc(message) : '';
+    var hdr  = '<div class="result-header">'
+             + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' \u00b7 ' + elapsed + infoMsg + '</span>'
+             + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
+             + '</div>';
+
+    var tbl = '<table><thead><tr>';
+    for (var i = 0; i < columns.length; i++) tbl += '<th>' + esc(columns[i]) + '</th>';
+    tbl += '</tr></thead><tbody>';
+    for (var r = 0; r < rowCount; r++) {
+      tbl += '<tr>';
+      for (var c = 0; c < columns.length; c++) {
+        var val = (rows[r] && rows[r][c] != null) ? rows[r][c] : '';
+        var isNull = val === 'NULL';
+        tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '">'
+             + (isNull ? 'NULL' : esc(val)) + '</td>';
+      }
+      tbl += '</tr>';
+    }
+    tbl += '</tbody></table>';
+
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;height:100%';
+    wrap.innerHTML = hdr + '<div style="flex:1;overflow:auto">' + tbl + '</div>';
+    var res = document.getElementById('results');
+    res.innerHTML = '';
+    res.appendChild(wrap);
+  }
+
+  function setStatus(html) { document.getElementById('status').innerHTML = html; }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/\x3e/g,'&gt;').replace(/"/g,'&quot;');
+  }
+</script>
+</body>
+</html>`;
+}
+
+// ─── http runner ─────────────────────────────────────────────────────────────
+
+interface HttpResult {
+    status: number;
+    statusText: string;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+    time: number;
+    size: number;
+}
+
+function doHttpRequest(
+    method: string,
+    urlStr: string,
+    headers: Record<string, string>,
+    body?: string
+): Promise<HttpResult> {
+    return new Promise((resolve, reject) => {
+        let parsed: URL;
+        try { parsed = new URL(urlStr); }
+        catch { reject(new Error(`Invalid URL: ${urlStr}`)); return; }
+
+        const isHttps = parsed.protocol === 'https:';
+        const t0 = Date.now();
+
+        const onResponse = (res: http.IncomingMessage) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+                const buf = Buffer.concat(chunks);
+                resolve({
+                    status: res.statusCode ?? 0,
+                    statusText: res.statusMessage ?? '',
+                    headers: res.headers as Record<string, string | string[] | undefined>,
+                    body: buf.toString('utf-8'),
+                    time: Date.now() - t0,
+                    size: buf.length,
+                });
+            });
+            res.on('error', reject);
+        };
+
+        const req = isHttps
+            ? https.request(parsed, { method, headers, rejectUnauthorized: false }, onResponse)
+            : http.request(parsed, { method, headers }, onResponse);
+
+        req.on('error', reject);
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error('Request timed out (30 s)')); });
+        if (body) req.write(body);
+        req.end();
+    });
+}
+
+function detectApiUrl(cwd: string): string {
+    function scan(dir: string, depth: number): string | undefined {
+        if (depth > 4) return undefined;
+        const p = path.join(dir, 'Properties', 'launchSettings.json');
+        if (fs.existsSync(p)) return p;
+        try {
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+                    const found = scan(path.join(dir, e.name), depth + 1);
+                    if (found) return found;
+                }
+            }
+        } catch { /* ignore */ }
+    }
+
+    const file = scan(cwd, 0);
+    if (!file) return '';
+    try {
+        const json = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        for (const profile of Object.values(json?.profiles ?? {})) {
+            const urls = (profile as { applicationUrl?: string }).applicationUrl;
+            if (urls) {
+                const parts = urls.split(';').map((u: string) => u.trim());
+                return parts.find((u: string) => u.startsWith('https://')) ?? parts[0] ?? '';
+            }
+        }
+    } catch { /* ignore */ }
+    return '';
+}
+
+let httpPanel: vscode.WebviewPanel | undefined;
+
+async function httpRunner(): Promise<void> {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const baseUrl = cwd ? detectApiUrl(cwd) : '';
+
+    if (httpPanel) {
+        httpPanel.reveal(vscode.ViewColumn.One);
+        const httpNonce = getNonce();
+        httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
+        return;
+    }
+
+    httpPanel = vscode.window.createWebviewPanel(
+        'openbase.httpRunner', 'OpenBase HTTP', vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true }
+    );
+    httpPanel.onDidDispose(() => { httpPanel = undefined; });
+    const httpNonce = getNonce();
+    httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
+
+    httpPanel.webview.onDidReceiveMessage(async (msg: {
+        command: string;
+        method?: string;
+        url?: string;
+        headers?: Record<string, string>;
+        body?: string;
+    }) => {
+        if (msg.command !== 'send') return;
+        const { method = 'GET', url = '', headers = {}, body } = msg;
+        try {
+            const result = await doHttpRequest(method, url, headers, body);
+            httpPanel?.webview.postMessage({ command: 'response', ...result });
+        } catch (e: unknown) {
+            httpPanel?.webview.postMessage({ command: 'error', text: e instanceof Error ? e.message : String(e) });
+        }
+    });
+}
+
+function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string): string {
+    const safeBase = JSON.stringify(baseUrl);
+    return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
+  input,select,textarea{background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);font-family:inherit;font-size:inherit;outline:none;padding:4px 7px}
+  input:focus,select:focus,textarea:focus{border-color:var(--vscode-focusBorder)}
+  input::placeholder,textarea::placeholder{color:var(--vscode-input-placeholderForeground)}
+  .btn{border:none;cursor:pointer;font-family:inherit;font-size:inherit;padding:4px 10px}
+  .btn-primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
+  .btn-primary:hover{background:var(--vscode-button-hoverBackground)}
+  .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+  .btn-secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);font-size:11px}
+  .btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackground)}
+  .btn-ghost{background:transparent;color:var(--vscode-foreground);padding:1px 6px;opacity:.5;border:none;cursor:pointer;font-size:14px}
+  .btn-ghost:hover{opacity:1;background:var(--vscode-list-hoverBackground)}
+
+  /* URL bar */
+  .url-bar{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0;background:var(--vscode-sideBar-background);align-items:center}
+  #method{width:92px}
+  #url-input{flex:1}
+
+  /* method color hints */
+  .m-GET{color:#6fbf6f} .m-POST{color:#bf9c6f} .m-PUT{color:#6f9cbf}
+  .m-PATCH{color:#bf6fbf} .m-DELETE{color:#bf6f6f} .m-OPTIONS,.m-HEAD{color:#9c9c9c}
+
+  /* tabs */
+  .tab-strip{display:flex;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0;background:var(--vscode-sideBar-background)}
+  .tab{padding:5px 14px;cursor:pointer;font-size:12px;border-bottom:2px solid transparent;user-select:none}
+  .tab:hover{background:var(--vscode-list-hoverBackground)}
+  .tab.active{border-bottom-color:var(--vscode-focusBorder);color:var(--vscode-textLink-activeForeground)}
+
+  /* request section */
+  .req-section{flex:0 0 auto;border-bottom:2px solid var(--vscode-panel-border);display:flex;flex-direction:column}
+  .tab-content{flex:1;overflow-y:auto;padding:8px 12px;max-height:190px;min-height:60px}
+  .hidden{display:none!important}
+
+  /* kv rows */
+  .kv-row{display:flex;gap:4px;margin-bottom:4px;align-items:center}
+  .kv-row .key{flex:0 0 38%}
+  .kv-row .val{flex:1}
+
+  /* body */
+  .body-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px}
+  #body-text{width:100%;min-height:110px;resize:none;font-family:var(--vscode-editor-font-family,monospace);font-size:var(--vscode-editor-font-size,12px);line-height:1.5}
+
+  /* auth */
+  .auth-label{font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:6px}
+
+  /* response section */
+  .res-section{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  .res-bar{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid var(--vscode-panel-border);flex-shrink:0;font-size:12px;background:var(--vscode-sideBar-background);min-height:32px}
+  .status-badge{padding:2px 8px;border-radius:3px;font-weight:700;font-size:12px}
+  .s2xx{background:rgba(80,180,80,.2);color:#6fca6f;border:1px solid rgba(80,180,80,.3)}
+  .s3xx{background:rgba(200,160,60,.2);color:#cabd6f;border:1px solid rgba(200,160,60,.3)}
+  .s4xx{background:rgba(200,80,60,.2);color:#ca7a6f;border:1px solid rgba(200,80,60,.3)}
+  .s5xx{background:rgba(200,40,40,.2);color:#ca5a5a;border:1px solid rgba(200,40,40,.3)}
+  .meta{font-size:11px;color:var(--vscode-descriptionForeground)}
+  .res-body-wrap{flex:1;overflow:auto;padding:10px 12px}
+  .placeholder-msg{color:var(--vscode-descriptionForeground);font-size:12px;font-style:italic}
+  .err-box{padding:8px 10px;background:var(--vscode-inputValidation-errorBackground);border:1px solid var(--vscode-inputValidation-errorBorder);font-size:12px;white-space:pre-wrap;font-family:monospace}
+  pre{font-family:var(--vscode-editor-font-family,monospace);font-size:var(--vscode-editor-font-size,12px);white-space:pre-wrap;word-break:break-all;line-height:1.6}
+
+  /* json syntax */
+  .jk{color:#9cdcfe} .js{color:#ce9178} .jn{color:#b5cea8} .jb{color:#569cd6}
+
+  /* response headers table */
+  .hdr-table{width:100%;border-collapse:collapse;font-size:12px}
+  .hdr-table th{text-align:left;padding:4px 8px;border-bottom:1px solid var(--vscode-panel-border);font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--vscode-descriptionForeground);font-weight:600}
+  .hdr-table td{padding:4px 8px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 30%,transparent);font-family:monospace;font-size:12px;word-break:break-all}
+  .hdr-table tr:hover td{background:var(--vscode-list-hoverBackground)}
+  .hdr-name{white-space:nowrap;width:34%;color:#9cdcfe}
+
+  .spinner{display:inline-block;width:11px;height:11px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<!-- URL BAR -->
+<div class="url-bar">
+  <select id="method" onchange="onMethodChange(this)">
+    <option>GET</option><option>POST</option><option>PUT</option>
+    <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
+  </select>
+  <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
+  <button id="send-btn" class="btn btn-primary">▶ Send</button>
+</div>
+
+<!-- REQUEST TABS -->
+<div class="req-section">
+  <div class="tab-strip">
+    <div class="tab active" onclick="reqTab(this,'headers')">Headers</div>
+    <div class="tab" onclick="reqTab(this,'body')">Body</div>
+    <div class="tab" onclick="reqTab(this,'auth')">Auth</div>
+  </div>
+
+  <div id="req-headers" class="tab-content">
+    <div id="headers-list"></div>
+    <button class="btn btn-secondary" style="margin-top:4px" onclick="addHeader('','')">+ Add Header</button>
+  </div>
+
+  <div id="req-body" class="tab-content hidden">
+    <div class="body-toolbar">
+      <span>Body:</span>
+      <select id="body-type" onchange="onBodyType()">
+        <option value="none">none</option>
+        <option value="json">JSON</option>
+        <option value="text">Text</option>
+        <option value="form">Form URL-encoded</option>
+      </select>
+    </div>
+    <textarea id="body-text" class="hidden" placeholder='{"key": "value"}'></textarea>
+  </div>
+
+  <div id="req-auth" class="tab-content hidden">
+    <p class="auth-label">Bearer Token — automatically added as Authorization header on send</p>
+    <input id="auth-token" type="password" style="width:100%" placeholder="eyJhbGci...">
+    <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
+      <input id="auth-show" type="checkbox" style="width:auto" onchange="document.getElementById('auth-token').type=this.checked?'text':'password'">
+      <label for="auth-show" style="font-size:11px;cursor:pointer">Show token</label>
+    </div>
+  </div>
+</div>
+
+<!-- RESPONSE SECTION -->
+<div class="res-section">
+  <div class="res-bar" id="res-bar">
+    <span class="placeholder-msg">Send a request to see the response</span>
+  </div>
+  <div class="tab-strip hidden" id="res-tab-strip">
+    <div class="tab active" onclick="resTab(this,'body')">Body</div>
+    <div class="tab" onclick="resTab(this,'headers')">Headers</div>
+  </div>
+  <div class="res-body-wrap" id="res-body-wrap"></div>
+  <div class="res-body-wrap hidden" id="res-headers-wrap"></div>
+</div>
+
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  let sending = false;
+  const BASE_URL = ${safeBase};
+
+  // init
+  if (BASE_URL) document.getElementById('url-input').value = BASE_URL + '/api/';
+  addHeader('Content-Type', 'application/json');
+  addHeader('Accept', 'application/json');
+
+  document.getElementById('send-btn').addEventListener('click', sendRequest);
+  document.getElementById('url-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendRequest();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
+  });
+
+  var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
+
+  function onMethodChange(sel) {
+    sel.className = 'm-' + sel.value;
+    var noBody = NO_BODY_METHODS.indexOf(sel.value) !== -1;
+    document.querySelectorAll('.req-section .tab').forEach(function(t) {
+      if (t.textContent === 'Body') t.style.opacity = noBody ? '.35' : '';
+    });
+    if (noBody) {
+      var bodyTab = document.querySelector('.req-section .tab.active');
+      if (bodyTab && bodyTab.textContent === 'Body') {
+        reqTab(document.querySelector('.req-section .tab'), 'headers');
+      }
+    }
+  }
+  onMethodChange(document.getElementById('method'));
+
+  // \u2500\u2500 request tabs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function reqTab(el, id) {
+    document.querySelectorAll('.req-section .tab').forEach(function(t) { t.classList.remove('active'); });
+    ['req-headers','req-body','req-auth'].forEach(function(i) { document.getElementById(i).classList.add('hidden'); });
+    el.classList.add('active');
+    document.getElementById('req-' + id).classList.remove('hidden');
+  }
+
+  function resTab(el, id) {
+    document.querySelectorAll('#res-tab-strip .tab').forEach(function(t) { t.classList.remove('active'); });
+    document.getElementById('res-body-wrap').classList.add('hidden');
+    document.getElementById('res-headers-wrap').classList.add('hidden');
+    el.classList.add('active');
+    document.getElementById('res-' + id + '-wrap').classList.remove('hidden');
+  }
+
+  // \u2500\u2500 headers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function addHeader(k, v) {
+    var row = document.createElement('div');
+    row.className = 'kv-row';
+    var ki = document.createElement('input'); ki.className = 'key'; ki.type = 'text'; ki.value = k || ''; ki.placeholder = 'Header name';
+    var vi = document.createElement('input'); vi.className = 'val'; vi.type = 'text'; vi.value = v || ''; vi.placeholder = 'Value';
+    var rm = document.createElement('button'); rm.className = 'btn-ghost'; rm.textContent = '\u00d7'; rm.onclick = function() { row.remove(); };
+    row.appendChild(ki); row.appendChild(vi); row.appendChild(rm);
+    document.getElementById('headers-list').appendChild(row);
+    if (!k) ki.focus();
+    return row;
+  }
+
+  function collectHeaders() {
+    var h = {};
+    document.getElementById('headers-list').querySelectorAll('.kv-row').forEach(function(r) {
+      var ins = r.querySelectorAll('input');
+      var k = ins[0].value.trim(), v = ins[1].value.trim();
+      if (k) h[k] = v;
+    });
+    return h;
+  }
+
+  // \u2500\u2500 body type \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function onBodyType() {
+    var t = document.getElementById('body-type').value;
+    var txt = document.getElementById('body-text');
+    txt.classList.toggle('hidden', t === 'none');
+    if (t === 'json')      txt.placeholder = '{\\n  "key": "value"\\n}';
+    else if (t === 'form') txt.placeholder = 'key1=value1&key2=value2';
+    else                   txt.placeholder = 'Request body...';
+  }
+
+  var sendTimeoutId = null;
+  function clearSendTimeout() {
+    if (sendTimeoutId) { clearTimeout(sendTimeoutId); sendTimeoutId = null; }
+  }
+
+  // \u2500\u2500 send \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function sendRequest() {
+    if (sending) return;
+    var url = document.getElementById('url-input').value.trim();
+    if (!url) {
+      showError('Enter a URL before sending.');
+      return;
+    }
+
+    var method = document.getElementById('method').value;
+    var hdrs = collectHeaders();
+
+    var token = document.getElementById('auth-token').value.trim();
+    if (token) hdrs['Authorization'] = 'Bearer ' + token;
+
+    var bodyType = document.getElementById('body-type').value;
+    var body = undefined;
+    if (bodyType !== 'none' && NO_BODY_METHODS.indexOf(method) === -1) {
+      body = document.getElementById('body-text').value;
+      if (bodyType === 'json') {
+        if (!hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
+        if (body) {
+          try { JSON.parse(body); } catch {
+            showError('Invalid JSON body \u2014 fix the syntax before sending.');
+            return;
+          }
+        }
+      }
+      if (bodyType === 'form') hdrs['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+
+    sending = true;
+    document.getElementById('send-btn').disabled = true;
+    document.getElementById('res-bar').innerHTML = '<span class="spinner"></span><span class="meta">Sending\u2026</span>';
+    document.getElementById('res-tab-strip').classList.add('hidden');
+    document.getElementById('res-body-wrap').innerHTML = '';
+    document.getElementById('res-headers-wrap').innerHTML = '';
+    document.getElementById('res-body-wrap').classList.remove('hidden');
+    document.getElementById('res-headers-wrap').classList.add('hidden');
+
+    vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, body: body });
+
+    sendTimeoutId = setTimeout(function() {
+      sending = false;
+      document.getElementById('send-btn').disabled = false;
+      showError('Extension did not respond after 30s. Check the URL and try again.');
+    }, 30000);
+  }
+
+  // \u2500\u2500 messages \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  window.addEventListener('message', function(e) {
+    var m = e.data;
+    if (m.command === 'triggerSend') { sendRequest(); return; }
+    clearSendTimeout();
+    sending = false;
+    document.getElementById('send-btn').disabled = false;
+    if (m.command === 'response') showResponse(m);
+    else if (m.command === 'error') showError(m.text);
+  });
+
+  var lastRawBody = '';
+
+  function copyBody() {
+    if (!lastRawBody) return;
+    navigator.clipboard.writeText(lastRawBody).then(function() {
+      var btn = document.getElementById('copy-btn');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy'; }, 1500); }
+    });
+  }
+
+  function showResponse(m) {
+    lastRawBody = m.body || '';
+    var cls = m.status >= 500 ? 's5xx' : m.status >= 400 ? 's4xx' : m.status >= 300 ? 's3xx' : 's2xx';
+    var size = m.size >= 1024 ? (m.size / 1024).toFixed(1) + ' KB' : m.size + ' B';
+    document.getElementById('res-bar').innerHTML =
+      '<span class="status-badge ' + cls + '">' + m.status + ' ' + esc(m.statusText) + '</span>' +
+      '<span class="meta">' + m.time + ' ms</span>' +
+      '<span class="meta">\u00b7</span>' +
+      '<span class="meta">' + size + '</span>' +
+      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px" onclick="copyBody()">Copy</button>';
+    document.getElementById('res-tab-strip').classList.remove('hidden');
+
+    // body
+    var ct = flatHeader(m.headers, 'content-type') || '';
+    var bodyHtml;
+    if (/application\/json/i.test(ct) || looksLikeJson(m.body)) {
+      try { bodyHtml = syntaxHighlight(JSON.stringify(JSON.parse(m.body), null, 2)); }
+      catch { bodyHtml = esc(m.body); }
+    } else {
+      bodyHtml = esc(m.body);
+    }
+    document.getElementById('res-body-wrap').innerHTML = m.body
+      ? '<pre>' + bodyHtml + '</pre>'
+      : '<p class="placeholder-msg">Empty response body</p>';
+
+    // headers
+    var hdrHtml = '<table class="hdr-table"><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody>';
+    var hdrs = m.headers || {};
+    Object.keys(hdrs).sort().forEach(function(k) {
+      var v = Array.isArray(hdrs[k]) ? hdrs[k].join(', ') : String(hdrs[k] || '');
+      hdrHtml += '<tr><td class="hdr-name">' + esc(k) + '</td><td>' + esc(v) + '</td></tr>';
+    });
+    document.getElementById('res-headers-wrap').innerHTML = hdrHtml + '</tbody></table>';
+  }
+
+  function showError(text) {
+    document.getElementById('res-bar').innerHTML =
+      '<span class="status-badge s5xx">Error</span>';
+    document.getElementById('res-tab-strip').classList.add('hidden');
+    document.getElementById('res-body-wrap').innerHTML = '<div class="err-box">' + esc(text) + '</div>';
+    document.getElementById('res-body-wrap').classList.remove('hidden');
+  }
+
+  // \u2500\u2500 helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function flatHeader(hdrs, name) {
+    var v = hdrs[name] || hdrs[name.split('-').map(function(p,i){return i===0?p:p[0].toUpperCase()+p.slice(1);}).join('-')];
+    return Array.isArray(v) ? v[0] : (v || '');
+  }
+
+  function looksLikeJson(s) {
+    if (!s) return false; var t = s.trim(); return t[0] === '{' || t[0] === '[';
+  }
+
+  function syntaxHighlight(json) {
+    return json.replace(
+      /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\\b(?:true|false|null)\\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      function(m) {
+        var c = 'jn';
+        if (/^"/.test(m)) c = /:$/.test(m) ? 'jk' : 'js';
+        else if (/true|false/.test(m)) c = 'jb';
+        else if (/null/.test(m)) c = 'jb';
+        return '<span class="' + c + '">' + esc(m) + '</span>';
+      }
+    );
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/\x3e/g,'&gt;').replace(/"/g,'&quot;');
+  }
+</script>
+</body>
+</html>`;
+}
+
+// ─── runner sidebar (shared) ──────────────────────────────────────────────────
+
+class RunnerSidebarProvider implements vscode.WebviewViewProvider {
+    constructor(
+        private readonly label: string,
+        private readonly btnLabel: string,
+        private readonly open: () => void
+    ) {}
+
+    resolveWebviewView(view: vscode.WebviewView): void {
+        view.webview.options = { enableScripts: true };
+        view.webview.html = this._html();
+        view.onDidChangeVisibility(() => { if (view.visible) this.open(); });
+        view.webview.onDidReceiveMessage((msg) => { if (msg.command === 'open') this.open(); });
+    }
+
+    private _html(): string {
+        return /* html */`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<style>
+  body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:16px;text-align:center}
+  p{color:var(--vscode-descriptionForeground);font-size:12px;margin-bottom:12px}
+  button{padding:6px 12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-family:inherit;font-size:inherit;width:100%}
+  button:hover{background:var(--vscode-button-hoverBackground)}
+</style></head>
+<body>
+  <p>Click below to open ${this.label} in the editor.</p>
+  <button onclick="vscode.postMessage({command:'open'})">${this.btnLabel}</button>
+  <script>const vscode = acquireVsCodeApi();</script>
+</body></html>`;
+    }
+}
+
+// ─── status bar ──────────────────────────────────────────────────────────────
+
+function setupStatusBar(context: vscode.ExtensionContext): void {
+    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    item.command = 'openbase.sqlRunner';
+    context.subscriptions.push(item);
+
+    function refresh(): void {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) { item.hide(); return; }
+        const conn = findConnection(folder.uri.fsPath);
+        if (!conn) { item.hide(); return; }
+        item.text = `$(database) ${conn.label}`;
+        item.tooltip = `OpenBase — ${conn.type} · Clique para abrir o SQL Runner`;
+        item.show();
+    }
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(refresh),
+        vscode.window.onDidChangeActiveTextEditor(refresh),
+    );
+
+    refresh();
+}
+
 // ─── activate ────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
     panelProvider = new OpenBasePanelProvider();
+    setupStatusBar(context);
 
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(OpenBasePanelProvider.viewType, panelProvider),
+        vscode.window.registerWebviewViewProvider('openbase.sqlrunner.sidebar', new RunnerSidebarProvider('SQL Runner', 'Open SQL Runner', sqlRunner)),
+        vscode.window.registerWebviewViewProvider('openbase.httprunner.sidebar', new RunnerSidebarProvider('HTTP Runner', 'Open HTTP Runner', httpRunner)),
         reg('openbase.newProject',     newProject),
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
@@ -1358,6 +2414,10 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.update',         update),
         reg('openbase.history',        history),
         reg('openbase.version',        version),
+        vscode.commands.registerCommand('openbase.sqlRunner', () => sqlRunner()),
+        vscode.commands.registerCommand('openbase.httpRunner', () => httpRunner()),
+        vscode.commands.registerCommand('openbase.sqlRunner.run', () => sqlPanel?.webview.postMessage({ command: 'triggerRun' })),
+        vscode.commands.registerCommand('openbase.httpRunner.send', () => httpPanel?.webview.postMessage({ command: 'triggerSend' })),
     );
 }
 
