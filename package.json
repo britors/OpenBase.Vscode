@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.0",
+  "version": "10.3.1",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -20,6 +20,16 @@
           "id": "openbase",
           "title": "OpenBase",
           "icon": "icon-activitybar.svg"
+        },
+        {
+          "id": "openbase-sqlrunner",
+          "title": "OpenBase SQL Runner",
+          "icon": "icon-sqlrunner.svg"
+        },
+        {
+          "id": "openbase-httprunner",
+          "title": "OpenBase HTTP Runner",
+          "icon": "icon-httprunner.svg"
         }
       ]
     },
@@ -29,6 +39,20 @@
           "type": "webview",
           "id": "openbase.panel",
           "name": "New Project"
+        }
+      ],
+      "openbase-sqlrunner": [
+        {
+          "type": "webview",
+          "id": "openbase.sqlrunner.sidebar",
+          "name": "SQL Runner"
+        }
+      ],
+      "openbase-httprunner": [
+        {
+          "type": "webview",
+          "id": "openbase.httprunner.sidebar",
+          "name": "HTTP Runner"
         }
       ]
     },
@@ -97,6 +121,40 @@
         "command": "openbase.version",
         "title": "OpenBase: Version",
         "category": "OpenBase"
+      },
+      {
+        "command": "openbase.sqlRunner",
+        "title": "OpenBase: SQL Runner",
+        "category": "OpenBase",
+        "icon": "$(database)"
+      },
+      {
+        "command": "openbase.httpRunner",
+        "title": "OpenBase: HTTP Runner",
+        "category": "OpenBase",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "openbase.sqlRunner.run",
+        "title": "OpenBase: Run SQL Query",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.httpRunner.send",
+        "title": "OpenBase: Send HTTP Request",
+        "category": "OpenBase"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "openbase.sqlRunner.run",
+        "key": "f8",
+        "when": "activeWebviewPanelId == 'openbase.sqlRunner'"
+      },
+      {
+        "command": "openbase.httpRunner.send",
+        "key": "f8",
+        "when": "activeWebviewPanelId == 'openbase.httpRunner'"
       }
     ],
     "viewsWelcome": [
@@ -108,6 +166,16 @@
     "menus": {
       "commandPalette": [],
       "view/title": [
+        {
+          "command": "openbase.sqlRunner",
+          "when": "view == openbase.panel",
+          "group": "navigation"
+        },
+        {
+          "command": "openbase.httpRunner",
+          "when": "view == openbase.panel",
+          "group": "navigation"
+        },
         {
           "command": "openbase.specialist",
           "when": "view == openbase.panel",
