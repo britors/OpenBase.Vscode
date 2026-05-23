@@ -478,74 +478,6 @@ async function build(uri?: vscode.Uri): Promise<void> {
     openTerminal('Build', cwd, `openbase build -c ${config.label}${flags}`);
 }
 
-// ─── debug ──────────────────────────────────────────────────────────────────
-
-async function debugRun(uri?: vscode.Uri): Promise<void> {
-    if (!await guardInstalled()) return;
-
-    const config = await vscode.window.showQuickPick(
-        BUILD_CONFIGS.map((c): vscode.QuickPickItem => ({ label: c })),
-        { title: 'OpenBase: Debug — Configuration' }
-    );
-    if (!config) return;
-
-    const noBuild = await vscode.window.showQuickPick(
-        [{ label: 'No', description: 'Build before debug' },
-         { label: 'Yes', description: 'Skip build step' }],
-        { title: 'OpenBase: Debug — Skip build?' }
-    );
-    if (!noBuild) return;
-
-    const cwd = await resolveWorkingDir(uri);
-    if (!cwd) return;
-
-    if (noBuild.label === 'No') {
-        const channel = vscode.window.createOutputChannel('OpenBase: Debug Build');
-        channel.show(true);
-        const extraPath = dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        const ok = await new Promise<boolean>((resolve) => {
-            const child = exec(`openbase build -c ${config.label}`, { cwd, env });
-            child.stdout?.on('data', (d: string) => channel.append(d));
-            child.stderr?.on('data', (d: string) => channel.append(d));
-            child.on('close', (code) => resolve(code === 0));
-            child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
-        });
-        if (!ok) {
-            vscode.window.showErrorMessage('Build failed. Check the output panel.');
-            return;
-        }
-    }
-
-    const project = findEntryProject(cwd);
-    if (!project) {
-        vscode.window.showErrorMessage('No .csproj found in workspace.');
-        return;
-    }
-
-    const dllPath = path.join(path.dirname(project.csprojPath), 'bin', config.label, project.targetFramework, `${project.assemblyName}.dll`);
-    if (!fs.existsSync(dllPath)) {
-        vscode.window.showErrorMessage(`Built output not found: ${dllPath}`);
-        return;
-    }
-
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    const started = await vscode.debug.startDebugging(folder, {
-        type: 'coreclr',
-        request: 'launch',
-        name: 'OpenBase Debug',
-        program: dllPath,
-        cwd: path.dirname(project.csprojPath),
-        stopAtEntry: false,
-        env: { ASPNETCORE_ENVIRONMENT: 'Development' },
-        serverReadyAction: { action: 'openExternally', pattern: '\\bNow listening on:\\s+(https?://\\S+)' },
-    });
-
-    if (!started) {
-        vscode.window.showErrorMessage('Failed to start debugger. Is the C# extension installed?');
-    }
-}
-
 // ─── run ────────────────────────────────────────────────────────────────────
 
 async function run(uri?: vscode.Uri): Promise<void> {
@@ -656,7 +588,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             case 'procedure':    await this._procedure(msg.data as never, view);    break;
             case 'extensionAdd': await this._extensionAdd(msg.data as never, view); break;
             case 'build':        await this._build(msg.data as never, view);        break;
-            case 'debug':        await this._debug(msg.data as never, view);        break;
             case 'run':          await this._run(msg.data as never, view);          break;
             case 'stopRun': {
                 const proc = this._runProcess;
@@ -765,46 +696,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'ext' }); return; }
         const args = d.provider ? `${d.name} -p ${d.provider}` : d.name;
         await this._exec(`openbase extension add ${args}`, cwd, view, 'ext', 'OpenBase: Extension');
-    }
-
-    private async _debug(d: { configuration: string; noBuild: boolean }, view: vscode.WebviewView): Promise<void> {
-        const cwd = await this._cwd();
-        if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'debug' }); return; }
-
-        if (!d.noBuild) {
-            const ok = await this._exec(`openbase build -c ${d.configuration}`, cwd, view, 'debug', 'OpenBase: Debug Build');
-            if (!ok) return;
-        }
-
-        const project = findEntryProject(cwd);
-        if (!project) {
-            view.webview.postMessage({ command: 'error', ctx: 'debug', text: 'No .csproj found in workspace.' });
-            return;
-        }
-
-        const dllPath = path.join(path.dirname(project.csprojPath), 'bin', d.configuration, project.targetFramework, `${project.assemblyName}.dll`);
-        if (!fs.existsSync(dllPath)) {
-            view.webview.postMessage({ command: 'error', ctx: 'debug', text: `Built output not found: ${dllPath}` });
-            return;
-        }
-
-        const folder = vscode.workspace.workspaceFolders?.[0];
-        const started = await vscode.debug.startDebugging(folder, {
-            type: 'coreclr',
-            request: 'launch',
-            name: 'OpenBase Debug',
-            program: dllPath,
-            cwd: path.dirname(project.csprojPath),
-            stopAtEntry: false,
-            env: { ASPNETCORE_ENVIRONMENT: 'Development' },
-            serverReadyAction: { action: 'openExternally', pattern: '\\bNow listening on:\\s+(https?://\\S+)' },
-        });
-
-        if (started) {
-            view.webview.postMessage({ command: 'done', ctx: 'debug', text: 'Debugger launched.' });
-        } else {
-            view.webview.postMessage({ command: 'error', ctx: 'debug', text: 'Failed to start debugger. Is the C# extension installed?' });
-        }
     }
 
     private async _build(d: { configuration: string; noRestore: boolean }, view: vscode.WebviewView): Promise<void> {
@@ -933,8 +824,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div class="nav-item"        data-page="pr"      onclick="nav(this,'pr')">Procedure</div>
     <div class="nav-item"        data-page="ext"     onclick="nav(this,'ext')">Extension</div>
     <div class="nav-item"        data-page="build"   onclick="nav(this,'build')">Build</div>
-    <div class="nav-item"        data-page="debug"   onclick="nav(this,'debug')">Debug</div>
-    <div class="nav-item"        data-page="run"     onclick="nav(this,'run')">Run</div>
+<div class="nav-item"        data-page="run"     onclick="nav(this,'run')">Run</div>
     <div class="nav-item"        data-page="update"  onclick="nav(this,'update')">Update CLI</div>
     <div class="nav-item"        data-page="history" onclick="nav(this,'history')">History</div>
   </nav>
@@ -1074,17 +964,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   </div>
 
   <!-- DEBUG -->
-  <div id="page-debug" class="page">
-    <div class="field"><label>Configuration</label>
-      <select id="debug-cfg"><option value="Debug">Debug</option><option value="Release">Release</option></select>
-    </div>
-    <div class="field"><label class="check-label"><input id="debug-nb" type="checkbox"> Skip build (--no-build)</label></div>
-    <p class="hint" style="margin-top:6px">Requer a extensão C# (coreclr) instalada no VS Code.</p>
-    <div id="debug-err" class="err"></div>
-    <div id="debug-ok" class="ok"></div>
-    <button id="debug-btn" class="btn-primary" onclick="submitDebug()" data-label="Build &amp; Debug">Build &amp; Debug</button>
-  </div>
-
   <!-- RUN -->
   <div id="page-run" class="page">
     <div class="field"><label>Configuration</label>
@@ -1162,6 +1041,24 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         .filter(function(v) { return v; });
     }
 
+    function clearFields(ctx) {
+      if (ctx === 'sc') {
+        document.getElementById('sc-entity').value = '';
+        document.getElementById('sc-schema').value = '';
+        document.getElementById('sc-table').value = '';
+        document.getElementById('sc-mig').checked = false;
+      } else if (ctx === 'sp') {
+        document.getElementById('sp-entity').value = '';
+        document.getElementById('sp-method').value = '';
+        document.getElementById('sp-sql').value = '';
+        document.getElementById('sp-params').innerHTML = '';
+        document.getElementById('sp-cols').innerHTML = '';
+      } else if (ctx === 'pr') {
+        document.getElementById('pr-name').value = '';
+        document.getElementById('pr-schema').value = '';
+      }
+    }
+
     function pickFolder() { vscode.postMessage({ command: 'pickFolder' }); }
 
     function err(ctx, msg) {
@@ -1189,6 +1086,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       } else if (m.command === 'done') {
         loading(m.ctx, false);
         if (m.text) ok(m.ctx, m.text);
+        clearFields(m.ctx);
       } else if (m.command === 'error') {
         loading(m.ctx, false);
         err(m.ctx, m.text);
@@ -1297,15 +1195,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'build', data: {
         configuration: document.getElementById('build-cfg').value,
         noRestore: document.getElementById('build-nr').checked,
-      }});
-    }
-
-    function submitDebug() {
-      err('debug', '');
-      loading('debug', true);
-      vscode.postMessage({ command: 'debug', data: {
-        configuration: document.getElementById('debug-cfg').value,
-        noBuild: document.getElementById('debug-nb').checked,
       }});
     }
 
@@ -1655,6 +1544,36 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   td{padding:4px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 40%,transparent);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
   tr:hover td{background:var(--vscode-list-hoverBackground)}
   td.null{color:var(--vscode-descriptionForeground);font-style:italic}
+
+  /* ── OpenBase brand theme ── */
+  :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
+  html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
+  .header{background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10))!important;border-bottom:1px solid var(--ob-border)!important}
+  .header-title{background:linear-gradient(90deg,var(--ob-purple),var(--ob-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .badge{background:rgba(180,79,255,.2)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border)}
+  .badge.warn{background:rgba(255,63,164,.15)!important;color:var(--ob-pink)!important;border-color:rgba(255,63,164,.35)!important}
+  .editor-wrap{border-bottom:1px solid var(--ob-border)!important}
+  textarea{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
+  textarea::placeholder{color:var(--ob-dim)!important}
+  .toolbar{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important}
+  .btn-primary{background:linear-gradient(135deg,var(--ob-purple),var(--ob-pink))!important;color:#fff!important;border-radius:4px}
+  .btn-primary:hover:not(:disabled){filter:brightness(1.15)}
+  .btn-primary:disabled{opacity:.35!important}
+  .btn-secondary{background:rgba(180,79,255,.12)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border);border-radius:4px}
+  .btn-secondary:hover{background:rgba(180,79,255,.24)!important}
+  .btn-cancel{border-radius:4px}
+  .hint{color:var(--ob-dim)!important}
+  .status{color:var(--ob-dim)!important}
+  .results{background:var(--ob-bg0)!important}
+  .placeholder{color:var(--ob-dim)!important}
+  .result-header{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important;color:var(--ob-dim)!important}
+  thead{background:var(--ob-bg1)!important}
+  th{border-bottom-color:var(--ob-border)!important;color:var(--ob-purple)!important}
+  td{border-bottom:1px solid rgba(180,79,255,.07)!important}
+  tr:hover td{background:rgba(180,79,255,.07)!important}
+  .err-box{background:rgba(255,63,164,.10)!important;border-color:rgba(255,63,164,.35)!important;color:#ff90c0!important}
+  .msg-box{background:rgba(180,79,255,.10)!important;border-color:var(--ob-border)!important;color:var(--ob-purple)!important}
+  .spinner{border-color:var(--ob-purple)!important;border-top-color:transparent!important}
 </style>
 </head>
 <body>
@@ -1956,8 +1875,6 @@ async function httpRunner(): Promise<void> {
 
     if (httpPanel) {
         httpPanel.reveal(vscode.ViewColumn.One);
-        const httpNonce = getNonce();
-        httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
         return;
     }
 
@@ -1973,13 +1890,43 @@ async function httpRunner(): Promise<void> {
         command: string;
         method?: string;
         url?: string;
-        headers?: Record<string, string>;
+        headers?: Array<{name: string; value: string}> | Record<string, string>;
+        bodyType?: string;
         body?: string;
+        authToken?: string;
     }) => {
+        if (msg.command === 'ready') {
+            if (httpPendingRequest) {
+                const pending = httpPendingRequest;
+                httpPendingRequest = undefined;
+                httpPanel?.webview.postMessage({ command: 'loadRequest', ...pending });
+            }
+            return;
+        }
+
+        if (msg.command === 'saveRequest') {
+            const requestsDir = getRequestsDir();
+            if (!requestsDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+            const name = await vscode.window.showInputBox({
+                prompt: 'Save request as',
+                placeHolder: 'get-users',
+                validateInput: v => v?.trim() && /^[^\\/:\*\?"<>\|]+$/.test(v.trim()) ? undefined : 'Invalid name',
+            });
+            if (!name?.trim()) return;
+            const safeName = name.trim().replace(/\.json$/i, '') + '.json';
+            fs.mkdirSync(requestsDir, { recursive: true });
+            const data = { method: msg.method, url: msg.url, headers: msg.headers, bodyType: msg.bodyType, body: msg.body, authToken: msg.authToken };
+            fs.writeFileSync(path.join(requestsDir, safeName), JSON.stringify(data, null, 2), 'utf-8');
+            vscode.window.showInformationMessage(`Request saved: ${safeName}`);
+            httpRequestProvider?.refresh();
+            return;
+        }
+
         if (msg.command !== 'send') return;
-        const { method = 'GET', url = '', headers = {}, body } = msg;
+        const { method = 'GET', url = '', body } = msg;
+        const headers = (Array.isArray(msg.headers) ? {} : msg.headers) ?? {};
         try {
-            const result = await doHttpRequest(method, url, headers, body);
+            const result = await doHttpRequest(method, url, headers as Record<string, string>, body);
             httpPanel?.webview.postMessage({ command: 'response', ...result });
         } catch (e: unknown) {
             httpPanel?.webview.postMessage({ command: 'error', text: e instanceof Error ? e.message : String(e) });
@@ -2068,6 +2015,42 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 
   .spinner{display:inline-block;width:11px;height:11px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
   @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── OpenBase brand theme ── */
+  :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
+  html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
+  input,select,textarea{background:var(--ob-bg2)!important;color:var(--ob-text)!important;border-color:var(--ob-border)!important}
+  input:focus,select:focus,textarea:focus{border-color:var(--ob-purple)!important}
+  input::placeholder,textarea::placeholder{color:var(--ob-dim)!important}
+  .btn-primary{background:linear-gradient(135deg,var(--ob-purple),var(--ob-pink))!important;color:#fff!important;border-radius:4px}
+  .btn-primary:hover:not(:disabled){filter:brightness(1.15)}
+  .btn-primary:disabled{opacity:.35!important}
+  .btn-secondary{background:rgba(180,79,255,.12)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border);border-radius:4px}
+  .btn-secondary:hover{background:rgba(180,79,255,.24)!important}
+  .btn-ghost{color:var(--ob-dim)!important}
+  .btn-ghost:hover{background:rgba(180,79,255,.12)!important;color:var(--ob-text)!important;opacity:1!important}
+  .url-bar{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important}
+  .tab-strip{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important}
+  .tab:hover{background:rgba(180,79,255,.08)!important}
+  .tab.active{border-bottom-color:var(--ob-purple)!important;color:var(--ob-purple)!important}
+  .req-section{border-bottom:2px solid var(--ob-border)!important}
+  .tab-content{background:var(--ob-bg0)}
+  .res-bar{background:var(--ob-bg1)!important;border-bottom:1px solid var(--ob-border)!important}
+  .res-body-wrap,.res-headers-wrap{background:var(--ob-bg0)}
+  .placeholder-msg{color:var(--ob-dim)!important}
+  .spinner{border-color:var(--ob-purple)!important;border-top-color:transparent!important}
+  .err-box{background:rgba(255,63,164,.10)!important;border-color:rgba(255,63,164,.35)!important;color:#ff90c0!important}
+  .hdr-table th{border-bottom-color:var(--ob-border)!important;color:var(--ob-dim)!important}
+  .hdr-table td{border-bottom-color:rgba(180,79,255,.08)!important}
+  .hdr-table tr:hover td{background:rgba(180,79,255,.07)!important}
+  .hdr-name{color:var(--ob-purple)!important}
+  .meta{color:var(--ob-dim)!important}
+  .jk{color:#d08fff}.js{color:#ff9fd8}.jn{color:#7dffb8}.jb{color:#8888ff}
+  .status-badge.s2xx{background:rgba(80,220,120,.15)!important;color:#6fdc8f!important;border-color:rgba(80,220,120,.25)!important}
+  .status-badge.s4xx{background:rgba(255,63,164,.15)!important;color:#ff80c0!important;border-color:rgba(255,63,164,.3)!important}
+  .status-badge.s5xx{background:rgba(255,40,40,.15)!important;color:#ff7070!important;border-color:rgba(255,40,40,.3)!important}
+  .status-badge.s3xx{background:rgba(255,200,60,.12)!important;color:#ffd060!important;border-color:rgba(255,200,60,.25)!important}
+  #copy-btn{background:rgba(180,79,255,.12)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border)!important}
 </style>
 </head>
 <body>
@@ -2080,6 +2063,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
   <button id="send-btn" class="btn btn-primary">▶ Send</button>
+  <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
 </div>
 
 <!-- REQUEST TABS -->
@@ -2133,6 +2117,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+  vscode.postMessage({ command: 'ready' });
   let sending = false;
   const BASE_URL = ${safeBase};
 
@@ -2142,6 +2127,23 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   addHeader('Accept', 'application/json');
 
   document.getElementById('send-btn').addEventListener('click', sendRequest);
+  document.getElementById('save-req-btn').addEventListener('click', function() {
+    var headers = [];
+    document.getElementById('headers-list').querySelectorAll('.kv-row').forEach(function(r) {
+      var ins = r.querySelectorAll('input');
+      var k = ins[0].value.trim(), v = ins[1].value.trim();
+      if (k) headers.push({ name: k, value: v });
+    });
+    vscode.postMessage({
+      command: 'saveRequest',
+      method: document.getElementById('method').value,
+      url: document.getElementById('url-input').value.trim(),
+      headers: headers,
+      bodyType: document.getElementById('body-type').value,
+      body: document.getElementById('body-text').value,
+      authToken: document.getElementById('auth-token').value.trim()
+    });
+  });
   document.getElementById('url-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendRequest();
   });
@@ -2273,6 +2275,20 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerSend') { sendRequest(); return; }
+    if (m.command === 'loadRequest') {
+      var sel = document.getElementById('method');
+      sel.value = m.method || 'GET';
+      onMethodChange(sel);
+      document.getElementById('url-input').value = m.url || '';
+      document.getElementById('headers-list').innerHTML = '';
+      (m.headers || []).forEach(function(h) { addHeader(h.name, h.value); });
+      var bt = document.getElementById('body-type');
+      bt.value = m.bodyType || 'none';
+      onBodyType();
+      document.getElementById('body-text').value = m.body || '';
+      document.getElementById('auth-token').value = m.authToken || '';
+      return;
+    }
     clearSendTimeout();
     sending = false;
     document.getElementById('send-btn').disabled = false;
@@ -2559,6 +2575,162 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── HTTP request library ─────────────────────────────────────────────────────
+
+const HTTP_REQUESTS_SUBDIR = path.join('.openbase', 'http-runner', 'requests');
+
+function getRequestsDir(): string | undefined {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return cwd ? path.join(cwd, HTTP_REQUESTS_SUBDIR) : undefined;
+}
+
+interface HttpRequestData {
+    method?: string;
+    url?: string;
+    headers?: Array<{name: string; value: string}>;
+    bodyType?: string;
+    body?: string;
+    authToken?: string;
+}
+
+let httpPendingRequest: HttpRequestData | undefined;
+let httpRequestProvider: HttpRequestTreeProvider | undefined;
+
+class HttpRequestItem extends vscode.TreeItem {
+    constructor(
+        public readonly fsPath: string,
+        public readonly kind: ScriptItemKind,
+    ) {
+        const basename = path.basename(fsPath);
+        const label = kind === 'script' ? basename.replace(/\.json$/i, '') : basename;
+        super(label, kind === 'folder'
+            ? vscode.TreeItemCollapsibleState.Collapsed
+            : vscode.TreeItemCollapsibleState.None);
+        this.contextValue = kind;
+        this.tooltip = basename;
+        if (kind === 'script') {
+            this.command = {
+                command: 'openbase.httpRunner.requests.open',
+                title: 'Open in HTTP Runner',
+                arguments: [this],
+            };
+            this.iconPath = new vscode.ThemeIcon('globe');
+        } else {
+            this.iconPath = vscode.ThemeIcon.Folder;
+        }
+    }
+}
+
+class HttpRequestTreeProvider implements vscode.TreeDataProvider<HttpRequestItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<HttpRequestItem | undefined | void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    refresh(): void { this._onDidChangeTreeData.fire(); }
+
+    getTreeItem(e: HttpRequestItem): vscode.TreeItem { return e; }
+
+    getChildren(element?: HttpRequestItem): vscode.ProviderResult<HttpRequestItem[]> {
+        const dir = element ? element.fsPath : getRequestsDir();
+        if (!dir || !fs.existsSync(dir)) return [];
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            const folders = entries
+                .filter(e => e.isDirectory())
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map(e => new HttpRequestItem(path.join(dir, e.name), 'folder'));
+            const files = entries
+                .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.json'))
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map(e => new HttpRequestItem(path.join(dir, e.name), 'script'));
+            return [...folders, ...files];
+        } catch { return []; }
+    }
+}
+
+async function openRequestInHttpRunner(filePath: string): Promise<void> {
+    let data: HttpRequestData = {};
+    try { data = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { /* use defaults */ }
+    if (httpPanel) {
+        httpPanel.reveal(vscode.ViewColumn.One);
+        httpPanel.webview.postMessage({ command: 'loadRequest', ...data });
+    } else {
+        httpPendingRequest = data;
+        await httpRunner();
+    }
+}
+
+function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
+    httpRequestProvider = new HttpRequestTreeProvider();
+
+    context.subscriptions.push(
+        vscode.window.createTreeView('openbase.httprunner.requests', {
+            treeDataProvider: httpRequestProvider,
+            showCollapseAll: true,
+        }),
+
+        (() => {
+            const w = vscode.workspace.createFileSystemWatcher(`**/${HTTP_REQUESTS_SUBDIR}/**`);
+            w.onDidCreate(() => httpRequestProvider?.refresh());
+            w.onDidDelete(() => httpRequestProvider?.refresh());
+            w.onDidChange(() => httpRequestProvider?.refresh());
+            return w;
+        })(),
+
+        vscode.workspace.onDidChangeWorkspaceFolders(() => httpRequestProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.refresh',
+            () => httpRequestProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.new',
+            async (item?: HttpRequestItem) => {
+                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getRequestsDir();
+                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+                const name = await promptScriptName('Request name');
+                if (!name) return;
+                const file = path.join(baseDir, name.replace(/\.json$/i, '') + '.json');
+                if (fs.existsSync(file)) { vscode.window.showErrorMessage(`"${path.basename(file)}" already exists.`); return; }
+                fs.mkdirSync(baseDir, { recursive: true });
+                fs.writeFileSync(file, JSON.stringify({ method: 'GET', url: '', headers: [], bodyType: 'none', body: '', authToken: '' }, null, 2), 'utf-8');
+                httpRequestProvider?.refresh();
+                await openRequestInHttpRunner(file);
+            }),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.newFolder',
+            async (item?: HttpRequestItem) => {
+                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getRequestsDir();
+                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+                const name = await promptScriptName('Folder name');
+                if (!name) return;
+                fs.mkdirSync(path.join(baseDir, name), { recursive: true });
+                httpRequestProvider?.refresh();
+            }),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.open',
+            async (item: HttpRequestItem) => openRequestInHttpRunner(item.fsPath)),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.rename',
+            async (item: HttpRequestItem) => {
+                const old = path.basename(item.fsPath);
+                const display = item.kind === 'script' ? old.replace(/\.json$/i, '') : old;
+                const name = await promptScriptName('Rename to', display);
+                if (!name || name === display) return;
+                const newName = item.kind === 'script' ? name.replace(/\.json$/i, '') + '.json' : name;
+                fs.renameSync(item.fsPath, path.join(path.dirname(item.fsPath), newName));
+                httpRequestProvider?.refresh();
+            }),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.delete',
+            async (item: HttpRequestItem) => {
+                const name = path.basename(item.fsPath);
+                const ans = await vscode.window.showWarningMessage(`Delete "${name}"?`, { modal: true }, 'Delete');
+                if (ans !== 'Delete') return;
+                if (item.kind === 'folder') fs.rmSync(item.fsPath, { recursive: true, force: true });
+                else fs.unlinkSync(item.fsPath);
+                httpRequestProvider?.refresh();
+            }),
+    );
+}
+
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
@@ -2590,6 +2762,7 @@ export function activate(context: vscode.ExtensionContext): void {
     panelProvider = new OpenBasePanelProvider();
     setupStatusBar(context);
     setupSqlScriptLibrary(context);
+    setupHttpRequestLibrary(context);
 
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
@@ -2606,7 +2779,6 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.extensionAdd',   extensionAdd),
         reg('openbase.extensionList',  extensionList),
         reg('openbase.build',          build),
-        reg('openbase.debug',          debugRun),
         reg('openbase.run',            run),
         reg('openbase.update',         update),
         reg('openbase.history',        history),
