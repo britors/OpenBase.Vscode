@@ -2268,7 +2268,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     // body
     var ct = flatHeader(m.headers, 'content-type') || '';
     var bodyHtml;
-    if (/application\/json/i.test(ct) || looksLikeJson(m.body)) {
+    if (/application\\/json/i.test(ct) || looksLikeJson(m.body)) {
       try { bodyHtml = syntaxHighlight(JSON.stringify(JSON.parse(m.body), null, 2)); }
       catch { bodyHtml = esc(m.body); }
     } else {
@@ -2308,7 +2308,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 
   function syntaxHighlight(json) {
     return json.replace(
-      /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\\b(?:true|false|null)\\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(?:\\s*:)?|\\b(?:true|false|null)\\b|-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)/g,
       function(m) {
         var c = 'jn';
         if (/^"/.test(m)) c = /:$/.test(m) ? 'jk' : 'js';
