@@ -4895,10 +4895,10 @@ function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
 
 interface MigrationInfo {
     id: string;
-    applied: boolean;
+    applied: boolean | null; // null = no DB connection, status unknown
 }
 
-type MigrationStatus = 'migration-applied' | 'migration-pending' | 'migration-message';
+type MigrationStatus = 'migration-applied' | 'migration-pending' | 'migration-unknown' | 'migration-message';
 
 class MigrationItem extends vscode.TreeItem {
     constructor(
@@ -4914,6 +4914,9 @@ class MigrationItem extends vscode.TreeItem {
         } else if (status === 'migration-pending') {
             this.iconPath = new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('list.warningForeground'));
             this.description = 'pending';
+        } else if (status === 'migration-unknown') {
+            this.iconPath = new vscode.ThemeIcon('question');
+            this.description = 'no db connection';
         } else {
             this.iconPath = new vscode.ThemeIcon('info');
         }
@@ -4957,9 +4960,13 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
                 this.items = [new MigrationItem(null, 'migration-message', 'No migrations found')];
                 if (this.treeView) this.treeView.description = undefined;
             } else {
-                this.items = migrations.map(m =>
-                    new MigrationItem(m, m.applied ? 'migration-applied' : 'migration-pending', m.id));
-                const pending = migrations.filter(m => !m.applied).length;
+                this.items = migrations.map(m => {
+                    const status: MigrationStatus = m.applied === null
+                        ? 'migration-unknown'
+                        : m.applied ? 'migration-applied' : 'migration-pending';
+                    return new MigrationItem(m, status, m.id);
+                });
+                const pending = migrations.filter(m => m.applied === false).length;
                 if (this.treeView) {
                     this.treeView.description = pending > 0 ? `${pending} pending` : undefined;
                 }
@@ -4976,52 +4983,105 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
     }
 }
 
-function findMigrationProject(cwd: string): string | undefined {
-    const found: string[] = [];
-    function scan(dir: string, depth: number): void {
-        if (depth > 4) return;
+function findMigrationsDir(cwd: string): string | undefined {
+    function scan(dir: string, depth: number): string | undefined {
+        if (depth > 6) return undefined;
         try {
             for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
-                    scan(path.join(dir, e.name), depth + 1);
-                } else if (e.isFile() && e.name.endsWith('.csproj')) {
-                    const content = fs.readFileSync(path.join(dir, e.name), 'utf-8');
-                    if (/Microsoft\.EntityFrameworkCore/i.test(content)) {
-                        found.push(path.join(dir, e.name));
-                    }
+                if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'bin' || e.name === 'obj') continue;
+                if (e.name === 'Migrations') {
+                    const full = path.join(dir, e.name);
+                    try {
+                        if (fs.readdirSync(full).some(f => /^\d{14}_/.test(f) && f.endsWith('.cs') && !f.endsWith('Designer.cs'))) {
+                            return full;
+                        }
+                    } catch { /* ignore */ }
                 }
+                const found = scan(path.join(dir, e.name), depth + 1);
+                if (found) return found;
             }
         } catch { /* ignore */ }
     }
-    scan(cwd, 0);
-    return found[0];
+    return scan(cwd, 0);
 }
 
-function parseMigrationsOutput(output: string): MigrationInfo[] {
-    return output
-        .split('\n')
-        .map(l => l.trim())
-        .filter(l => l && !/^(Build|Done|info\s*:|warn\s*:|error\s*:)/i.test(l))
-        .filter(l => /^[\w\d]/.test(l))
-        .map(l => {
-            const pending = /\(Pending\)$/i.test(l);
-            const id = l.replace(/\s*\(Pending\)\s*$/i, '').trim();
-            return { id, applied: !pending };
-        })
-        .filter(m => m.id.length > 0);
+function findMigrationProject(migrationsDir: string): string | undefined {
+    const projectDir = path.dirname(migrationsDir);
+    try {
+        const csproj = fs.readdirSync(projectDir).find(f => f.endsWith('.csproj'));
+        return csproj ? path.join(projectDir, csproj) : undefined;
+    } catch { return undefined; }
+}
+
+function listMigrationsFromFs(migrationsDir: string): string[] {
+    try {
+        return fs.readdirSync(migrationsDir)
+            .filter(f => /^\d{14}_/.test(f) && f.endsWith('.cs') && !f.endsWith('Designer.cs') && !f.endsWith('Snapshot.cs'))
+            .sort()
+            .map(f => f.replace(/\.cs$/, ''));
+    } catch { return []; }
+}
+
+async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
+    let cmd = '';
+    try {
+        switch (conn.type) {
+            case 'sqlserver': {
+                fs.writeFileSync(tmpFile, 'SELECT MigrationId FROM [dbo].[__EFMigrationsHistory]', 'utf-8');
+                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                if (conn.user)     parts.push(`-U "${conn.user}"`);
+                if (conn.password) parts.push(`-P "${conn.password}"`);
+                parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
+                cmd = parts.join(' ');
+                break;
+            }
+            case 'pgsql': {
+                fs.writeFileSync(tmpFile, 'SELECT "MigrationId" FROM "__EFMigrationsHistory"', 'utf-8');
+                const port = conn.port ?? '5432';
+                const u = encodeURIComponent(conn.user ?? 'postgres');
+                const p = encodeURIComponent(conn.password ?? '');
+                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                break;
+            }
+            default:
+                return new Set();
+        }
+        const stdout = await new Promise<string>((resolve, reject) => {
+            exec(cmd, { env, timeout: 10000 }, (err, out, stderr) => {
+                if (err && !out) reject(new Error(stderr || err.message));
+                else resolve(out);
+            });
+        });
+        const applied = new Set<string>();
+        for (const line of stdout.split('\n')) {
+            const id = line.trim().replace(/^"|"$/g, '');
+            if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
+        }
+        return applied;
+    } finally {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    }
 }
 
 async function listMigrations(cwd: string): Promise<MigrationInfo[]> {
-    return new Promise((resolve, reject) => {
-        const extraPath = dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        const project = findMigrationProject(cwd);
-        const projectFlag = project ? ` --project "${project}"` : '';
-        exec(`dotnet ef migrations list${projectFlag}`, { cwd, env, timeout: 60000 }, (err, stdout, stderr) => {
-            if (err) { reject(new Error(stderr.trim() || err.message)); return; }
-            resolve(parseMigrationsOutput(stdout));
-        });
-    });
+    const migrationsDir = findMigrationsDir(cwd);
+    if (!migrationsDir) throw new Error('Pasta Migrations/ não encontrada no workspace.');
+
+    const ids = listMigrationsFromFs(migrationsDir);
+    if (ids.length === 0) return [];
+
+    const conn = findConnection(cwd);
+    if (!conn) return ids.map(id => ({ id, applied: null }));
+
+    try {
+        const applied = await getAppliedMigrations(conn);
+        return ids.map(id => ({ id, applied: applied.has(id) }));
+    } catch {
+        return ids.map(id => ({ id, applied: null }));
+    }
 }
 
 function runMigrationCommand(cwd: string, efArgs: string[], title: string): void {
@@ -5029,7 +5089,8 @@ function runMigrationCommand(cwd: string, efArgs: string[], title: string): void
     channel.show(true);
     const extraPath = dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const project = findMigrationProject(cwd);
+    const migrationsDir = findMigrationsDir(cwd);
+    const project = migrationsDir ? findMigrationProject(migrationsDir) : undefined;
     const args = [...efArgs];
     if (project) args.push('--project', `"${project}"`);
     const child = exec(`dotnet ${args.join(' ')}`, { cwd, env, timeout: 120000 });
