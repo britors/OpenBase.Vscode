@@ -2564,6 +2564,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   </div>
 </div>
 
+
 <div id="http-history-panel" class="hidden">
   <div class="http-hist-toolbar">
     <span>Request history</span>
@@ -2975,6 +2976,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     if (bodyType !== 'none' && body) parts.push('-d ' + sq(body));
     return parts.join(' \\\n  ');
   }
+
 
   function toggleHttpHistory() {
     httpHistoryVisible = !httpHistoryVisible;
