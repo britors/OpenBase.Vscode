@@ -1430,6 +1430,101 @@ interface HistoryEntry {
     rowCount: number;
 }
 
+interface ExplainNode {
+    op: string;
+    detail: string;
+    cost: number;
+    rows: number;
+    children: ExplainNode[];
+}
+
+function pgPlanToNode(plan: Record<string, unknown>): ExplainNode {
+    const nodeType = String(plan['Node Type'] ?? 'Unknown');
+    const parts: string[] = [];
+    if (plan['Relation Name']) parts.push(String(plan['Relation Name']));
+    if (plan['Index Name'])    parts.push(`idx:${plan['Index Name']}`);
+    if (plan['Filter'])        parts.push(`filter:${String(plan['Filter']).slice(0, 80)}`);
+    if (plan['Join Filter'])   parts.push(`join:${String(plan['Join Filter']).slice(0, 80)}`);
+    const children: ExplainNode[] = [];
+    if (Array.isArray(plan['Plans'])) {
+        for (const child of plan['Plans'] as Record<string, unknown>[]) children.push(pgPlanToNode(child));
+    }
+    return { op: nodeType, detail: parts.join(' · '), cost: Number(plan['Total Cost'] ?? 0), rows: Number(plan['Plan Rows'] ?? 0), children };
+}
+
+function parsePgExplain(output: string): ExplainNode {
+    try {
+        const s = output.trim();
+        const start = s.indexOf('['), end = s.lastIndexOf(']');
+        if (start < 0 || end < 0) throw new Error('no json');
+        const json = JSON.parse(s.slice(start, end + 1)) as Array<{ Plan: Record<string, unknown> }>;
+        const plan = json[0]?.Plan;
+        if (!plan) throw new Error('no plan');
+        return pgPlanToNode(plan);
+    } catch {
+        return { op: 'Parse error', detail: output.slice(0, 300), cost: 0, rows: 0, children: [] };
+    }
+}
+
+function parseSsTextPlan(output: string): ExplainNode {
+    const nodeLines = output.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.includes('|--'));
+    if (!nodeLines.length) return { op: 'No plan', detail: output.replace(/\r?\n/g, ' ').slice(0, 200), cost: 0, rows: 0, children: [] };
+    const items = nodeLines.map(l => {
+        const idx = l.indexOf('|--');
+        const level = Math.round(idx / 3);
+        const text = l.slice(idx + 3).trim();
+        const rowM = text.match(/EstimateRows[=\s]+([0-9.]+)/i);
+        const opEnd = text.indexOf('(');
+        return {
+            level,
+            op: opEnd > 0 ? text.slice(0, opEnd).trim() : text,
+            detail: opEnd > 0 ? text.slice(opEnd + 1).replace(/\)$/, '').slice(0, 120) : '',
+            cost: 0,
+            rows: rowM ? Number(rowM[1]) : 0,
+        };
+    });
+    const stack: Array<ExplainNode & { level: number }> = [];
+    let root: (ExplainNode & { level: number }) | undefined;
+    for (const item of items) {
+        const node = { ...item, children: [] as ExplainNode[] };
+        while (stack.length && stack[stack.length - 1].level >= item.level) stack.pop();
+        if (!stack.length) root = node; else stack[stack.length - 1].children.push(node);
+        stack.push(node);
+    }
+    return root ?? { op: 'No plan', detail: '', cost: 0, rows: 0, children: [] };
+}
+
+function parseOraclePlan(output: string): ExplainNode {
+    const dataLines = output.split('\n').map(l => l.replace(/\r$/, '')).filter(l => /^\|\s*\d/.test(l));
+    if (!dataLines.length) return { op: 'No plan', detail: output.slice(0, 200), cost: 0, rows: 0, children: [] };
+    const items = dataLines.map(l => {
+        const cols = l.split('|').map(c => c.trim()).filter((_, i) => i > 0);
+        const rawOp = cols[1] ?? '';
+        return {
+            level: Math.floor((rawOp.length - rawOp.trimStart().length) / 2),
+            op: rawOp.trim(),
+            detail: cols[2] ?? '',
+            cost: parseInt((cols[5] ?? '').replace(/\s*\(.*/, ''), 10) || 0,
+            rows: parseInt(cols[3] ?? '0', 10) || 0,
+        };
+    });
+    const stack: Array<ExplainNode & { level: number }> = [];
+    let root: (ExplainNode & { level: number }) | undefined;
+    for (const item of items) {
+        const node = { ...item, children: [] as ExplainNode[] };
+        while (stack.length && stack[stack.length - 1].level >= item.level) stack.pop();
+        if (!stack.length) root = node; else stack[stack.length - 1].children.push(node);
+        stack.push(node);
+    }
+    return root ?? { op: 'No plan', detail: '', cost: 0, rows: 0, children: [] };
+}
+
+function parseExplainPlan(output: string, dbType: string): ExplainNode {
+    if (dbType === 'pgsql')   return parsePgExplain(output);
+    if (dbType === 'oracle')  return parseOraclePlan(output);
+    return parseSsTextPlan(output);
+}
+
 let sqlPanel: vscode.WebviewPanel | undefined;
 let sqlProcess: import('child_process').ChildProcess | undefined;
 let sqlLog: vscode.OutputChannel | undefined;
@@ -1528,6 +1623,67 @@ async function sqlRunner(): Promise<void> {
         if (msg.command === 'sendToSpecialist') {
             await vscode.commands.executeCommand('openbase.panel.focus');
             panelProvider?.postNavigateTo('sp', msg.sql ?? '');
+            return;
+        }
+
+        if (msg.command === 'explain') {
+            if (!msg.sql?.trim()) return;
+            const sql = msg.sql.trim();
+            const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const activeConn = activeCwd ? findConnection(activeCwd) : undefined;
+            if (!activeConn) {
+                sqlPanel?.webview.postMessage({ command: 'explainError', text: 'No connection configured.' });
+                return;
+            }
+            sqlPanel?.webview.postMessage({ command: 'explainRunning' });
+            const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
+            const extraPath = dotnetToolsPath();
+            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+            try {
+                let explainSql = '';
+                let cmd = '';
+                switch (activeConn.type) {
+                    case 'sqlserver': {
+                        explainSql = `SET SHOWPLAN_TEXT ON\nGO\n${sql}\nGO\nSET SHOWPLAN_TEXT OFF\nGO\n`;
+                        fs.writeFileSync(tmpFile, explainSql, 'utf-8');
+                        const p = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
+                        if (activeConn.user)     p.push(`-U "${activeConn.user}"`);
+                        if (activeConn.password) p.push(`-P "${activeConn.password}"`);
+                        p.push(`-i "${tmpFile}"`);
+                        cmd = p.join(' ');
+                        break;
+                    }
+                    case 'pgsql': {
+                        explainSql = `EXPLAIN (FORMAT JSON)\n${sql}`;
+                        fs.writeFileSync(tmpFile, explainSql, 'utf-8');
+                        const port = activeConn.port ?? '5432';
+                        const user = encodeURIComponent(activeConn.user ?? 'postgres');
+                        const pass = encodeURIComponent(activeConn.password ?? '');
+                        const url  = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
+                        cmd = `psql "${url}" -X -t -A -f "${tmpFile}"`;
+                        break;
+                    }
+                    case 'oracle': {
+                        explainSql = `EXPLAIN PLAN FOR\n${sql};\nSELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);\nEXIT\n`;
+                        fs.writeFileSync(tmpFile, explainSql, 'utf-8');
+                        cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
+                        break;
+                    }
+                }
+                const output = await new Promise<string>((resolve, reject) => {
+                    exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
+                        if (err && !stdout) reject(new Error(stderr || err.message));
+                        else resolve(stdout + (stderr ? '\n' + stderr : ''));
+                    });
+                });
+                const tree = parseExplainPlan(output, activeConn.type);
+                sqlPanel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
+            } catch (e: unknown) {
+                const text = e instanceof Error ? e.message : String(e);
+                sqlPanel?.webview.postMessage({ command: 'explainError', text });
+            } finally {
+                try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            }
             return;
         }
 
@@ -1700,6 +1856,19 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .history-pin{margin-left:auto;font-size:10px!important;padding:1px 6px!important;opacity:0;transition:opacity .15s}
   .history-item:hover .history-pin{opacity:1}
   .history-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
+  #explain-panel{flex:1;overflow:auto;display:flex;flex-direction:column;background:var(--ob-bg0)}
+  .explain-toolbar{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--ob-dim);border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
+  .explain-tree{padding:12px;overflow:auto;flex:1}
+  .explain-node{margin-left:14px;border-left:2px solid rgba(180,79,255,.2);padding-left:10px;margin-top:6px}
+  .explain-root{margin-left:0!important;border-left:none!important;padding-left:0!important;margin-top:0!important}
+  .node-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:3px 0}
+  .node-op{font-weight:600;font-size:12px;color:var(--ob-text)}
+  .node-detail{font-size:11px;color:var(--ob-dim);font-style:italic}
+  .cost-badge{font-size:10px;padding:1px 5px;border-radius:3px;font-family:monospace}
+  .rows-badge{font-size:10px;color:var(--ob-dim);font-family:monospace}
+  .cost-low{background:rgba(52,211,153,.15);color:#34d399;border:1px solid rgba(52,211,153,.3)}
+  .cost-med{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}
+  .cost-high{background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.3)}
 </style>
 </head>
 <body>
@@ -1714,6 +1883,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 <div class="toolbar">
   <button id="run-btn" class="btn btn-primary">&#x25B6; Run</button>
   <button id="cancel-btn" class="btn btn-cancel hidden">&#x2715; Cancel</button>
+  <button id="explain-btn" class="btn btn-secondary" title="Show execution plan (Explain)">&#x26A1; Explain</button>
   <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save&hellip;</button>
   <button id="history-btn" class="btn btn-secondary" title="Show query history">History</button>
   <button id="specialist-btn" class="btn btn-secondary" title="Send query to Specialist">&#x2192; Specialist</button>
@@ -1729,6 +1899,13 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     <button id="clear-history-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
   </div>
   <div id="history-list"><p class="history-empty">No history yet.</p></div>
+</div>
+<div id="explain-panel" class="hidden">
+  <div class="explain-toolbar">
+    <span>Execution plan</span>
+    <button id="back-from-explain-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">&#xAB; Results</button>
+  </div>
+  <div id="explain-tree" class="explain-tree"><p class="placeholder">Loading…</p></div>
 </div>
 <script src="${monacoBase}/loader.js"></script>
 <script nonce="${nonce}">
@@ -1746,6 +1923,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   var pendingLoad = null;
   var historyEntries = [];
   var historyVisible = false;
+  var activePanel = 'results'; // 'results' | 'history' | 'explain'
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -1790,6 +1968,16 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     var sel = editor ? editor.getSelection() : null;
     if (sel && !sel.isEmpty()) sql = editor.getModel().getValueInRange(sel);
     if (sql.trim()) vscode.postMessage({ command: 'sendToSpecialist', sql: sql });
+  });
+  document.getElementById('explain-btn').addEventListener('click', function() {
+    var sql = editor ? editor.getValue() : '';
+    var sel = editor ? editor.getSelection() : null;
+    if (sel && !sel.isEmpty()) sql = editor.getModel().getValueInRange(sel);
+    if (!sql.trim()) return;
+    vscode.postMessage({ command: 'explain', sql: sql });
+  });
+  document.getElementById('back-from-explain-btn').addEventListener('click', function() {
+    showPanel('results');
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
@@ -2006,7 +2194,17 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       document.getElementById('cancel-btn').classList.add('hidden');
       setStatus('');
       lastColumns = []; lastRows = [];
-      document.getElementById('results').innerHTML = '<div class="msg-box">Query cancelled.</div>';
+      document.getElementById('results').innerHTML = '<div class="msg-box">Query cancelled.\x3c/div>';
+    } else if (m.command === 'explainRunning') {
+      showPanel('explain');
+      document.getElementById('explain-tree').innerHTML = '\x3cdiv style="padding:20px;display:flex;align-items:center;gap:8px">\x3cspan class="spinner">\x3c/span>\x3cspan style="color:var(--ob-dim);font-size:12px">Generating execution plan…\x3c/span>\x3c/div>';
+    } else if (m.command === 'explainResult') {
+      showPanel('explain');
+      var maxC = calcMaxCost(m.tree);
+      document.getElementById('explain-tree').innerHTML = renderExplainNode(m.tree, maxC, true);
+    } else if (m.command === 'explainError') {
+      showPanel('explain');
+      document.getElementById('explain-tree').innerHTML = '\x3cdiv class="err-box">' + esc(m.text) + '\x3c/div>';
     }
   });
 
@@ -2048,11 +2246,43 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     res.appendChild(wrap);
   }
 
+  function showPanel(which) {
+    activePanel = which;
+    document.getElementById('results').classList.toggle('hidden', which !== 'results');
+    document.getElementById('history-panel').classList.toggle('hidden', which !== 'history');
+    document.getElementById('explain-panel').classList.toggle('hidden', which !== 'explain');
+    historyVisible = (which === 'history');
+    document.getElementById('history-btn').textContent = historyVisible ? '\xAB Results' : 'History';
+  }
+
   function toggleHistory() {
-    historyVisible = !historyVisible;
-    document.getElementById('history-panel').classList.toggle('hidden', !historyVisible);
-    document.getElementById('results').classList.toggle('hidden', historyVisible);
-    document.getElementById('history-btn').textContent = historyVisible ? '« Results' : 'History';
+    showPanel(historyVisible ? 'results' : 'history');
+  }
+
+  function calcMaxCost(node) {
+    if (!node) return 0;
+    var max = node.cost || 0;
+    for (var i = 0; i < (node.children || []).length; i++) {
+      var c = calcMaxCost(node.children[i]);
+      if (c > max) max = c;
+    }
+    return max;
+  }
+
+  function renderExplainNode(node, maxCost, isRoot) {
+    if (!node) return '';
+    var pct = (maxCost > 0 && node.cost > 0) ? (node.cost / maxCost * 100) : -1;
+    var costHtml = node.cost > 0
+      ? '\x3cspan class="cost-badge ' + (pct > 66 ? 'cost-high' : pct > 33 ? 'cost-med' : 'cost-low') + '">cost ' + node.cost.toFixed(2) + '\x3c/span>'
+      : '';
+    var rowsHtml = node.rows > 0 ? '\x3cspan class="rows-badge">' + node.rows + ' rows\x3c/span>' : '';
+    var detailHtml = node.detail ? '\x3cspan class="node-detail">' + esc(node.detail) + '\x3c/span>' : '';
+    var kids = '';
+    for (var i = 0; i < (node.children || []).length; i++) kids += renderExplainNode(node.children[i], maxCost, false);
+    return '\x3cdiv class="explain-node' + (isRoot ? ' explain-root' : '') + '">'
+      + '\x3cdiv class="node-row">\x3cspan class="node-op">' + esc(node.op) + '\x3c/span>' + detailHtml + costHtml + rowsHtml + '\x3c/div>'
+      + (kids ? '\x3cdiv class="node-children">' + kids + '\x3c/div>' : '')
+      + '\x3c/div>';
   }
 
   function renderHistory() {
