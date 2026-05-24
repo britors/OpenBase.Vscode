@@ -571,6 +571,10 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
     }
 
+    postNavigateTo(tab: string, query: string): void {
+        this._view?.webview.postMessage({ command: 'navigateTo', tab, query });
+    }
+
     private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
         if (msg.command === 'pickFolder') {
             const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
@@ -1096,6 +1100,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
     window.addEventListener('message', function(e) {
       var m = e.data;
+      if (m.command === 'navigateTo') {
+        var navEl = document.querySelector('.nav-item[data-page="' + m.tab + '"]');
+        if (navEl) nav(navEl, m.tab);
+        if (m.tab === 'sp' && m.query) {
+          var fld = document.getElementById('sp-sql');
+          if (fld) {
+            fld.value = m.query;
+            fld.focus();
+            fld.style.outline = '2px solid var(--vscode-focusBorder)';
+            setTimeout(function() { fld.style.outline = ''; }, 1200);
+          }
+        }
+        return;
+      }
       if (m.command === 'folderPicked') {
         document.getElementById('new-folder').value = m.path;
       } else if (m.command === 'done') {
@@ -1507,6 +1525,12 @@ async function sqlRunner(): Promise<void> {
             return;
         }
 
+        if (msg.command === 'sendToSpecialist') {
+            await vscode.commands.executeCommand('openbase.panel.focus');
+            panelProvider?.postNavigateTo('sp', msg.sql ?? '');
+            return;
+        }
+
         if (msg.command !== 'run' || !msg.sql?.trim()) {
             sqlOut().appendLine(`[SQL Runner] Ignored message: command=${msg.command}, sql empty=${!msg.sql?.trim()}`);
             return;
@@ -1692,6 +1716,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <button id="cancel-btn" class="btn btn-cancel hidden">&#x2715; Cancel</button>
   <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save&hellip;</button>
   <button id="history-btn" class="btn btn-secondary" title="Show query history">History</button>
+  <button id="specialist-btn" class="btn btn-secondary" title="Send query to Specialist">&#x2192; Specialist</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
@@ -1759,6 +1784,12 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
         if (historyVisible) toggleHistory();
       }
     }
+  });
+  document.getElementById('specialist-btn').addEventListener('click', function() {
+    var sql = editor ? editor.getValue() : '';
+    var sel = editor ? editor.getSelection() : null;
+    if (sel && !sel.isEmpty()) sql = editor.getModel().getValueInRange(sel);
+    if (sql.trim()) vscode.postMessage({ command: 'sendToSpecialist', sql: sql });
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
