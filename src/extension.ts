@@ -2451,7 +2451,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 
 <!-- URL BAR -->
 <div class="url-bar">
-  <select id="method" onchange="onMethodChange(this)">
+  <select id="method">
     <option>GET</option><option>POST</option><option>PUT</option>
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
@@ -2476,20 +2476,20 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 <!-- REQUEST TABS -->
 <div class="req-section">
   <div class="tab-strip">
-    <div class="tab active" onclick="reqTab(this,'headers')">Headers</div>
-    <div class="tab" onclick="reqTab(this,'body')">Body</div>
-    <div class="tab" onclick="reqTab(this,'auth')">Auth</div>
+    <div class="tab active" data-tab="headers">Headers</div>
+    <div class="tab" data-tab="body">Body</div>
+    <div class="tab" data-tab="auth">Auth</div>
   </div>
 
   <div id="req-headers" class="tab-content">
     <div id="headers-list"></div>
-    <button class="btn btn-secondary" style="margin-top:4px" onclick="addHeader('','')">+ Add Header</button>
+    <button id="add-header-btn" class="btn btn-secondary" style="margin-top:4px">+ Add Header</button>
   </div>
 
   <div id="req-body" class="tab-content hidden">
     <div class="body-toolbar">
       <span>Body:</span>
-      <select id="body-type" onchange="onBodyType()">
+      <select id="body-type">
         <option value="none">none</option>
         <option value="json">JSON</option>
         <option value="text">Text</option>
@@ -2503,7 +2503,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <p class="auth-label">Bearer Token — automatically added as Authorization header on send</p>
     <input id="auth-token" type="password" style="width:100%" placeholder="eyJhbGci...">
     <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
-      <input id="auth-show" type="checkbox" style="width:auto" onchange="document.getElementById('auth-token').type=this.checked?'text':'password'">
+      <input id="auth-show" type="checkbox" style="width:auto">
       <label for="auth-show" style="font-size:11px;cursor:pointer">Show token</label>
     </div>
   </div>
@@ -2515,8 +2515,8 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <span class="placeholder-msg">Send a request to see the response</span>
   </div>
   <div class="tab-strip hidden" id="res-tab-strip">
-    <div class="tab active" onclick="resTab(this,'body')">Body</div>
-    <div class="tab" onclick="resTab(this,'headers')">Headers</div>
+    <div class="tab active" data-tab="body">Body</div>
+    <div class="tab" data-tab="headers">Headers</div>
   </div>
   <div class="res-body-wrap" id="res-body-wrap"></div>
   <div class="res-body-wrap hidden" id="res-headers-wrap"></div>
@@ -2542,6 +2542,12 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 </div>
 
 <script nonce="${nonce}">
+  window.onerror = function(msg, src, line, col) {
+    var box = document.createElement('div');
+    box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#c72e0f;color:#fff;padding:6px 10px;font-size:12px;font-family:monospace;z-index:9999;white-space:pre-wrap';
+    box.textContent = 'JS ERROR: ' + msg + '\\n' + src + ':' + line + ':' + col;
+    document.body.appendChild(box);
+  };
   const vscode = acquireVsCodeApi();
   vscode.postMessage({ command: 'ready' });
   let sending = false;
@@ -2645,6 +2651,18 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
     if (e.key === 'Escape') document.getElementById('curl-modal').classList.add('hidden');
+  });
+  document.getElementById('method').addEventListener('change', function() { onMethodChange(this); });
+  document.getElementById('body-type').addEventListener('change', function() { onBodyType(); });
+  document.getElementById('add-header-btn').addEventListener('click', function() { addHeader('',''); });
+  document.getElementById('auth-show').addEventListener('change', function() {
+    document.getElementById('auth-token').type = this.checked ? 'text' : 'password';
+  });
+  document.querySelectorAll('.req-section .tab-strip .tab').forEach(function(tab) {
+    tab.addEventListener('click', function() { reqTab(this, this.getAttribute('data-tab')); });
+  });
+  document.querySelectorAll('#res-tab-strip .tab').forEach(function(tab) {
+    tab.addEventListener('click', function() { resTab(this, this.getAttribute('data-tab')); });
   });
 
   var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
@@ -2832,7 +2850,9 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
       '<span class="meta">' + m.time + ' ms</span>' +
       '<span class="meta">\u00b7</span>' +
       '<span class="meta">' + size + '</span>' +
-      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px" onclick="copyBody()">Copy</button>';
+      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px">Copy</button>';
+    var cpBtn = document.getElementById('copy-btn');
+    if (cpBtn) cpBtn.addEventListener('click', copyBody);
     document.getElementById('res-tab-strip').classList.remove('hidden');
 
     // body
@@ -2875,10 +2895,10 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 
   function parseCurl(raw) {
     if (!raw) return null;
-    var text = raw.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!/^curl\b/i.test(text)) return null;
+    var text = raw.replace(/\\\\\\r?\\n/g, ' ').replace(/\\s+/g, ' ').trim();
+    if (!/^curl\\b/i.test(text)) return null;
     var method = 'GET', url = '', headers = [], body = '', bodyType = 'none', authToken = '';
-    var tokens = [], re = /(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s]+)/g, m;
+    var tokens = [], re = /(?:'[^']*'|"(?:\\\\.|[^"\\\\])*"|[^\\s]+)/g, m;
     while ((m = re.exec(text)) !== null) tokens.push(m[0]);
     var i = 0;
     while (i < tokens.length) {
@@ -4144,6 +4164,213 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── OpenAPI / Swagger import ─────────────────────────────────────────────────
+
+interface OApiSchema {
+    type?: string;
+    properties?: Record<string, OApiSchema>;
+    additionalProperties?: OApiSchema | boolean;
+    items?: OApiSchema;
+    $ref?: string;
+    example?: unknown;
+    enum?: unknown[];
+    format?: string;
+    allOf?: OApiSchema[];
+    oneOf?: OApiSchema[];
+    anyOf?: OApiSchema[];
+}
+
+interface OApiOperation {
+    operationId?: string;
+    summary?: string;
+    parameters?: Array<{ name: string; in: string; required?: boolean; schema?: OApiSchema; type?: string }>;
+    requestBody?: { content?: Record<string, { schema?: OApiSchema }>; required?: boolean };
+    security?: Array<Record<string, string[]>>;
+    tags?: string[];
+}
+
+interface OApiSpec {
+    swagger?: string;
+    openapi?: string;
+    info?: { title?: string; version?: string };
+    servers?: Array<{ url: string }>;
+    host?: string;
+    basePath?: string;
+    schemes?: string[];
+    paths?: Record<string, Record<string, OApiOperation>>;
+    components?: { schemas?: Record<string, OApiSchema>; securitySchemes?: Record<string, unknown> };
+    definitions?: Record<string, OApiSchema>;
+    securityDefinitions?: Record<string, unknown>;
+}
+
+function oapiSanitizeFilename(name: string): string {
+    return name.replace(/[^a-zA-Z0-9_\-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 80) || 'request';
+}
+
+function oapiResolveRef(ref: string, spec: OApiSpec): OApiSchema | undefined {
+    const parts = ref.replace(/^#\//, '').split('/');
+    let cur: Record<string, unknown> = spec as unknown as Record<string, unknown>;
+    for (const p of parts) { cur = cur?.[p] as Record<string, unknown>; }
+    return cur as OApiSchema | undefined;
+}
+
+function oapiSchemaToExample(schema: OApiSchema | undefined, spec: OApiSpec, depth = 0): unknown {
+    if (!schema || depth > 4) return null;
+    if (schema.$ref) {
+        const resolved = oapiResolveRef(schema.$ref, spec);
+        return oapiSchemaToExample(resolved, spec, depth + 1);
+    }
+    if (schema.example !== undefined) return schema.example;
+    if (schema.enum?.length) return schema.enum[0];
+    const merged: OApiSchema = schema.allOf?.length
+        ? schema.allOf.reduce((acc, s) => {
+            const r = schema.$ref ? oapiResolveRef(schema.$ref, spec) ?? s : s;
+            return { ...acc, properties: { ...acc.properties, ...(r.properties ?? {}) }, type: acc.type ?? r.type };
+          }, {} as OApiSchema)
+        : (schema.oneOf?.[0] ?? schema.anyOf?.[0] ?? schema);
+    const s = merged.$ref ? (oapiResolveRef(merged.$ref, spec) ?? merged) : merged;
+    switch (s.type) {
+        case 'object': {
+            if (!s.properties) return {};
+            const obj: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(s.properties)) obj[k] = oapiSchemaToExample(v, spec, depth + 1);
+            return obj;
+        }
+        case 'array': return [oapiSchemaToExample(s.items, spec, depth + 1)];
+        case 'integer': return 0;
+        case 'number': return 0.0;
+        case 'boolean': return false;
+        case 'string':
+            if (s.format === 'date-time') return new Date().toISOString();
+            if (s.format === 'date') return new Date().toISOString().slice(0, 10);
+            if (s.format === 'uuid') return '00000000-0000-0000-0000-000000000000';
+            return 'string';
+        default: return null;
+    }
+}
+
+async function importSwaggerToHttpRunner(): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: { 'OpenAPI / Swagger (JSON)': ['json'] },
+        title: 'Select OpenAPI / Swagger JSON file',
+    });
+    if (!uris?.length) return;
+
+    const reqDir = getRequestsDir();
+    if (!reqDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+
+    let spec: OApiSpec;
+    try {
+        spec = JSON.parse(fs.readFileSync(uris[0].fsPath, 'utf-8'));
+    } catch {
+        vscode.window.showErrorMessage('Failed to parse JSON. Only JSON format is supported (not YAML).');
+        return;
+    }
+
+    if (!spec.paths || typeof spec.paths !== 'object') {
+        vscode.window.showErrorMessage('No "paths" found in the OpenAPI/Swagger spec.');
+        return;
+    }
+
+    const isSwagger2 = !!spec.swagger;
+    const apiTitle = spec.info?.title ?? 'api';
+    const folderName = oapiSanitizeFilename(apiTitle);
+
+    let baseUrl = '';
+    if (isSwagger2) {
+        const scheme = spec.schemes?.[0] ?? 'https';
+        const host = spec.host ?? 'localhost';
+        const base = spec.basePath ?? '';
+        baseUrl = `${scheme}://${host}${base}`;
+    } else {
+        baseUrl = spec.servers?.[0]?.url ?? '';
+    }
+    baseUrl = baseUrl.replace(/\/$/, '');
+
+    const globalSecurity = (spec as unknown as Record<string, unknown>)['security'] as Array<Record<string, string[]>> | undefined;
+    const secDefs = spec.components?.securitySchemes ?? spec.securityDefinitions ?? {};
+    function hasBearerSecurity(opSecurity?: Array<Record<string, string[]>>): boolean {
+        const sec = opSecurity ?? globalSecurity ?? [];
+        return sec.some(s => Object.keys(s).some(k => {
+            const def = (secDefs as Record<string, unknown>)[k] as Record<string, unknown> | undefined;
+            return def && (def['type'] === 'http' && def['scheme'] === 'bearer'
+                || def['type'] === 'oauth2'
+                || def['type'] === 'apiKey' && def['in'] === 'header' && String(def['name'] ?? '').toLowerCase() === 'authorization');
+        }));
+    }
+
+    const targetDir = path.join(reqDir, folderName);
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'];
+    let created = 0;
+
+    for (const [apiPath, pathItem] of Object.entries(spec.paths)) {
+        for (const method of httpMethods) {
+            const op = pathItem[method] as OApiOperation | undefined;
+            if (!op) continue;
+
+            const pathForUrl = apiPath.replace(/\{([^}]+)\}/g, '{{$1}}');
+            const url = baseUrl + pathForUrl;
+
+            const headers: Array<{ name: string; value: string }> = [];
+            let bodyType = 'none';
+            let body = '';
+            let authToken = '';
+
+            if (hasBearerSecurity(op.security)) {
+                authToken = '{{token}}';
+            }
+
+            if (op.requestBody?.content) {
+                const contentTypes = Object.keys(op.requestBody.content);
+                const jsonType = contentTypes.find(t => t.includes('json')) ?? contentTypes[0];
+                if (jsonType) {
+                    const schema = op.requestBody.content[jsonType]?.schema;
+                    if (jsonType.includes('json')) {
+                        bodyType = 'json';
+                        const example = oapiSchemaToExample(schema, spec);
+                        body = JSON.stringify(example, null, 2);
+                        headers.push({ name: 'Content-Type', value: 'application/json' });
+                    } else if (jsonType.includes('form')) {
+                        bodyType = 'form';
+                    } else {
+                        bodyType = 'text';
+                    }
+                }
+            }
+
+            const queryParams = (op.parameters ?? []).filter(p => p.in === 'query');
+            let finalUrl = url;
+            if (queryParams.length) {
+                const qs = queryParams.map(p => `${p.name}={{${p.name}}}`).join('&');
+                finalUrl = url + '?' + qs;
+            }
+
+            const data: HttpRequestData = {
+                method: method.toUpperCase(),
+                url: finalUrl,
+                headers,
+                bodyType,
+                body,
+                authToken,
+            };
+
+            const opId = op.operationId?.trim();
+            const fallback = `${method.toUpperCase()}_${apiPath.replace(/\//g, '_').replace(/[{}]/g, '').replace(/^_/, '')}`;
+            const filename = oapiSanitizeFilename(opId || fallback) + '.json';
+            const filePath = path.join(targetDir, filename);
+
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+            created++;
+        }
+    }
+
+    httpRequestProvider?.refresh();
+    vscode.window.showInformationMessage(`Imported ${created} request${created !== 1 ? 's' : ''} from "${apiTitle}" into "${folderName}".`);
+}
+
 // ─── HTTP request library ─────────────────────────────────────────────────────
 
 const HTTP_REQUESTS_SUBDIR = path.join('.openbase', 'http-runner', 'requests');
@@ -4297,6 +4524,9 @@ function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
                 else fs.unlinkSync(item.fsPath);
                 httpRequestProvider?.refresh();
             }),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.importSwagger',
+            () => importSwaggerToHttpRunner()),
     );
 }
 
