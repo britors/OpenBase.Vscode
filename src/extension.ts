@@ -655,6 +655,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             view.webview.postMessage({ command: 'done', ctx: 'sc', text: 'Terminal aberto — preencha as propriedades da entidade no terminal.' });
             return;
         }
+
+        const previewDetail = [
+            `Entity: ${d.entity}`,
+            d.schema ? `Schema: ${d.schema}` : '',
+            d.table  ? `Table: ${d.table}` : '',
+            d.runMigrations ? 'Migrations: will run automatically after scaffold' : '',
+        ].filter(Boolean).join('\n');
+        const confirmed = await vscode.window.showInformationMessage(
+            `Scaffold "${d.entity}"`,
+            { modal: true, detail: previewDetail + '\n\nThis will generate or overwrite project files. Proceed?' },
+            'Generate'
+        );
+        if (!confirmed) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
+
         const args = [`-e ${d.entity}`, '--mode modelfirst'];
         if (d.schema)         args.push(`--schema "${d.schema}"`);
         if (d.table)          args.push(`--table "${d.table}"`);
@@ -2372,6 +2386,11 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   .http-hist-body{padding:8px 12px;border-top:1px solid rgba(180,79,255,.07);background:var(--ob-bg1)}
   .http-hist-body pre{font-size:11px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all}
   .http-hist-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
+  .curl-modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:1000}
+  .curl-modal-inner{background:var(--ob-bg1);border:1px solid var(--ob-border);padding:16px;width:90%;max-width:520px;display:flex;flex-direction:column;gap:10px;border-radius:4px}
+  .curl-modal-title{font-size:13px;font-weight:600;color:var(--ob-purple)}
+  #curl-input{height:120px;resize:vertical;font-family:monospace;font-size:11px;width:100%}
+  .curl-modal-actions{display:flex;gap:8px;justify-content:flex-end}
   .env-bar{display:flex;align-items:center;gap:8px;padding:3px 12px;border-bottom:1px solid var(--ob-border);flex-shrink:0;background:var(--ob-bg1);font-size:11px}
   .env-label{color:var(--ob-dim)}
   #env-select{background:var(--ob-bg2)!important;color:var(--ob-text)!important;border:1px solid var(--ob-border)!important;padding:2px 6px;font-size:11px;border-radius:3px;max-width:160px}
@@ -2389,6 +2408,8 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
   <button id="send-btn" class="btn btn-primary">▶ Send</button>
   <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
+  <button id="import-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Import from cURL command">↓ cURL</button>
+  <button id="copy-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Copy as cURL">↑ cURL</button>
   <button id="http-history-btn" class="btn btn-secondary" title="Show request history">History</button>
 </div>
 
@@ -2451,6 +2472,17 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   <div class="res-body-wrap hidden" id="res-headers-wrap"></div>
 </div>
 
+<div id="curl-modal" class="curl-modal hidden">
+  <div class="curl-modal-inner">
+    <div class="curl-modal-title">Import cURL</div>
+    <textarea id="curl-input" placeholder="curl -X POST https://api.example.com/users \&#10;  -H 'Authorization: Bearer ...' \&#10;  -d '{&quot;key&quot;: &quot;value&quot;}'"></textarea>
+    <div class="curl-modal-actions">
+      <button id="curl-import-cancel" class="btn btn-secondary">Cancel</button>
+      <button id="curl-import-ok" class="btn btn-primary">Import</button>
+    </div>
+  </div>
+</div>
+
 <div id="http-history-panel" class="hidden">
   <div class="http-hist-toolbar">
     <span>Request history</span>
@@ -2489,6 +2521,30 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
       bodyType: document.getElementById('body-type').value,
       body: document.getElementById('body-text').value,
       authToken: document.getElementById('auth-token').value.trim()
+    });
+  });
+  document.getElementById('import-curl-btn').addEventListener('click', function() {
+    document.getElementById('curl-modal').classList.remove('hidden');
+    document.getElementById('curl-input').value = '';
+    setTimeout(function() { document.getElementById('curl-input').focus(); }, 50);
+  });
+  document.getElementById('curl-import-cancel').addEventListener('click', function() {
+    document.getElementById('curl-modal').classList.add('hidden');
+  });
+  document.getElementById('curl-import-ok').addEventListener('click', function() {
+    var parsed = parseCurl(document.getElementById('curl-input').value);
+    if (parsed && parsed.url) {
+      loadHistoryEntry(parsed);
+      document.getElementById('curl-modal').classList.add('hidden');
+    }
+  });
+  document.getElementById('copy-curl-btn').addEventListener('click', function() {
+    var curl = buildCurl();
+    if (!curl) return;
+    navigator.clipboard.writeText(curl).then(function() {
+      var btn = document.getElementById('copy-curl-btn');
+      btn.textContent = '✓ ok';
+      setTimeout(function() { btn.textContent = '↑ cURL'; }, 1500);
     });
   });
   document.getElementById('env-select').addEventListener('change', function() {
@@ -2538,6 +2594,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
+    if (e.key === 'Escape') document.getElementById('curl-modal').classList.add('hidden');
   });
 
   var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
@@ -2760,6 +2817,64 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   }
 
   // \u2500\u2500 helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function uq(s) {
+    if (!s) return '';
+    if ((s[0] === "'" && s[s.length-1] === "'") || (s[0] === '"' && s[s.length-1] === '"')) return s.slice(1, -1);
+    return s;
+  }
+
+  function parseCurl(raw) {
+    if (!raw) return null;
+    var text = raw.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!/^curl\b/i.test(text)) return null;
+    var method = 'GET', url = '', headers = [], body = '', bodyType = 'none', authToken = '';
+    var tokens = [], re = /(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s]+)/g, m;
+    while ((m = re.exec(text)) !== null) tokens.push(m[0]);
+    var i = 0;
+    while (i < tokens.length) {
+      var t = tokens[i];
+      if (i === 0 && /^curl$/i.test(t)) { i++; continue; }
+      if (t === '-X' || t === '--request') {
+        method = uq(tokens[++i] || 'GET').toUpperCase();
+      } else if (t === '-H' || t === '--header') {
+        var hdr = uq(tokens[++i] || '');
+        var col = hdr.indexOf(':');
+        if (col > 0) {
+          var hn = hdr.slice(0, col).trim(), hv = hdr.slice(col + 1).trim();
+          if (hn.toLowerCase() === 'authorization' && hv.toLowerCase().startsWith('bearer ')) {
+            authToken = hv.slice(7).trim();
+          } else { headers.push({ name: hn, value: hv }); }
+        }
+      } else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary' || t === '--data-urlencode') {
+        body = uq(tokens[++i] || '');
+        var tb = body.trim();
+        bodyType = (tb[0] === '{' || tb[0] === '[') ? 'json' : (body.indexOf('=') !== -1 ? 'form' : 'text');
+        if (method === 'GET') method = 'POST';
+      } else if (!t.startsWith('-') && !url) {
+        url = uq(t);
+      }
+      i++;
+    }
+    return { method: method, url: url, headers: headers, body: body, bodyType: bodyType, authToken: authToken };
+  }
+
+  function buildCurl() {
+    var url = document.getElementById('url-input').value.trim();
+    if (!url) return null;
+    var method = document.getElementById('method').value;
+    var sq = function(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; };
+    var parts = ['curl'];
+    if (method !== 'GET') parts.push('-X ' + method);
+    parts.push(sq(url));
+    collectHeadersArray().forEach(function(h) { parts.push('-H ' + sq(h.name + ': ' + h.value)); });
+    var token = document.getElementById('auth-token').value.trim();
+    if (token) parts.push('-H ' + sq('Authorization: Bearer ' + token));
+    var bodyType = document.getElementById('body-type').value;
+    var body = document.getElementById('body-text').value;
+    if (bodyType !== 'none' && body) parts.push('-d ' + sq(body));
+    return parts.join(' \\\n  ');
+  }
+
   function toggleHttpHistory() {
     httpHistoryVisible = !httpHistoryVisible;
     document.getElementById('http-history-panel').classList.toggle('hidden', !httpHistoryVisible);
