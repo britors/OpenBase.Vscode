@@ -80,6 +80,7 @@ async function guardInstalled(): Promise<boolean> {
 }
 
 let panelProvider: OpenBasePanelProvider | undefined;
+let extContext: vscode.ExtensionContext | undefined;
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
@@ -570,6 +571,10 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
     }
 
+    postNavigateTo(tab: string, query: string): void {
+        this._view?.webview.postMessage({ command: 'navigateTo', tab, query });
+    }
+
     private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
         if (msg.command === 'pickFolder') {
             const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
@@ -654,6 +659,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             view.webview.postMessage({ command: 'done', ctx: 'sc', text: 'Terminal aberto — preencha as propriedades da entidade no terminal.' });
             return;
         }
+
+        const previewDetail = [
+            `Entity: ${d.entity}`,
+            d.schema ? `Schema: ${d.schema}` : '',
+            d.table  ? `Table: ${d.table}` : '',
+            d.runMigrations ? 'Migrations: will run automatically after scaffold' : '',
+        ].filter(Boolean).join('\n');
+        const confirmed = await vscode.window.showInformationMessage(
+            `Scaffold "${d.entity}"`,
+            { modal: true, detail: previewDetail + '\n\nThis will generate or overwrite project files. Proceed?' },
+            'Generate'
+        );
+        if (!confirmed) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
+
         const args = [`-e ${d.entity}`, '--mode modelfirst'];
         if (d.schema)         args.push(`--schema "${d.schema}"`);
         if (d.table)          args.push(`--table "${d.table}"`);
@@ -1081,6 +1100,20 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
     window.addEventListener('message', function(e) {
       var m = e.data;
+      if (m.command === 'navigateTo') {
+        var navEl = document.querySelector('.nav-item[data-page="' + m.tab + '"]');
+        if (navEl) nav(navEl, m.tab);
+        if (m.tab === 'sp' && m.query) {
+          var fld = document.getElementById('sp-sql');
+          if (fld) {
+            fld.value = m.query;
+            fld.focus();
+            fld.style.outline = '2px solid var(--vscode-focusBorder)';
+            setTimeout(function() { fld.style.outline = ''; }, 1200);
+          }
+        }
+        return;
+      }
       if (m.command === 'folderPicked') {
         document.getElementById('new-folder').value = m.path;
       } else if (m.command === 'done') {
@@ -1338,6 +1371,65 @@ function getNonce(): string {
     return text;
 }
 
+const SQL_HISTORY_KEY = 'sqlQueryHistory';
+const SQL_HISTORY_LIMIT = 50;
+const HTTP_HISTORY_KEY = 'httpCallHistory';
+const HTTP_HISTORY_LIMIT = 100;
+const HTTP_ENVS_SUBDIR = path.join('.openbase', 'http-runner', 'envs');
+const HTTP_ACTIVE_ENV_KEY = 'httpActiveEnv';
+
+interface HttpEnvFile {
+    name: string;
+    variables: Record<string, string>;
+}
+
+function getEnvsDir(): string | undefined {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return cwd ? path.join(cwd, HTTP_ENVS_SUBDIR) : undefined;
+}
+
+function loadEnvFiles(): Array<{ filename: string; name: string; varCount: number }> {
+    const dir = getEnvsDir();
+    if (!dir || !fs.existsSync(dir)) return [];
+    try {
+        return fs.readdirSync(dir)
+            .filter(f => f.endsWith('.json'))
+            .sort()
+            .map(f => {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as HttpEnvFile;
+                    return { filename: f, name: data.name || f.replace(/\.json$/i, ''), varCount: Object.keys(data.variables ?? {}).length };
+                } catch { return null; }
+            })
+            .filter((x): x is { filename: string; name: string; varCount: number } => x !== null);
+    } catch { return []; }
+}
+
+function resolveEnvVars(text: string, variables: Record<string, string>): string {
+    return text.replace(/\{\{([^}]+)\}\}/g, (_, key: string) => variables[key.trim()] ?? `{{${key.trim()}}}`);
+}
+
+interface HttpHistoryEntry {
+    timestamp: number;
+    method: string;
+    url: string;
+    headers: Array<{name: string; value: string}>;
+    bodyType: string;
+    body: string;
+    authToken: string;
+    statusCode: number;
+    statusText: string;
+    responseBody: string;
+    responseTimeMs: number;
+}
+
+interface HistoryEntry {
+    sql: string;
+    timestamp: number;
+    connectionLabel: string;
+    rowCount: number;
+}
+
 let sqlPanel: vscode.WebviewPanel | undefined;
 let sqlProcess: import('child_process').ChildProcess | undefined;
 let sqlLog: vscode.OutputChannel | undefined;
@@ -1367,7 +1459,7 @@ async function sqlRunner(): Promise<void> {
     const sqlNonce = getNonce();
     sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
 
-    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string }) => {
+    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string; table?: string; keyColumn?: string; keyValue?: string; column?: string; newValue?: string }) => {
         sqlOut().appendLine(`[SQL Runner] Message received: ${msg.command}`);
 
         if (msg.command === 'ready') {
@@ -1376,6 +1468,8 @@ async function sqlRunner(): Promise<void> {
                 sqlPendingScript = undefined;
                 sqlPanel?.webview.postMessage({ command: 'loadScript', content: pending.content, name: pending.name });
             }
+            const historyEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
             return;
         }
 
@@ -1397,6 +1491,12 @@ async function sqlRunner(): Promise<void> {
             return;
         }
 
+        if (msg.command === 'clearHistory') {
+            await extContext?.globalState.update(SQL_HISTORY_KEY, []);
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: [] });
+            return;
+        }
+
         if (msg.command === 'cancel') {
             sqlProcess?.kill();
             sqlProcess = undefined;
@@ -1414,6 +1514,20 @@ async function sqlRunner(): Promise<void> {
                 fs.writeFileSync(uri.fsPath, msg.csvData, 'utf-8');
                 vscode.window.showInformationMessage(`Saved: ${uri.fsPath}`);
             }
+            return;
+        }
+
+        if (msg.command === 'editCell') {
+            if (!msg.table || !msg.keyColumn || !msg.column) return;
+            const quoteVal = (v: string) => /^-?\d+(\.\d+)?$/.test(v) ? v : `'${v.replace(/'/g, "''")}'`;
+            const updateSql = `UPDATE ${msg.table}\nSET ${msg.column} = ${quoteVal(msg.newValue ?? '')}\nWHERE ${msg.keyColumn} = ${quoteVal(msg.keyValue ?? '')};`;
+            sqlPanel?.webview.postMessage({ command: 'loadScript', content: updateSql, name: 'update' });
+            return;
+        }
+
+        if (msg.command === 'sendToSpecialist') {
+            await vscode.commands.executeCommand('openbase.panel.focus');
+            panelProvider?.postNavigateTo('sp', msg.sql ?? '');
             return;
         }
 
@@ -1486,6 +1600,12 @@ async function sqlRunner(): Promise<void> {
             const result = parseSqlOutput(output, activeConn.type);
             sqlOut().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
             sqlPanel?.webview.postMessage({ command: 'result', ...result });
+
+            const prevEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
+            const newEntry: HistoryEntry = { sql, timestamp: Date.now(), connectionLabel: activeConn.label, rowCount: result.rows.length };
+            const updatedEntries = [newEntry, ...prevEntries].slice(0, SQL_HISTORY_LIMIT);
+            await extContext?.globalState.update(SQL_HISTORY_KEY, updatedEntries);
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
             sqlOut().appendLine(`[SQL Runner] Error: ${text}`);
@@ -1541,6 +1661,8 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   td{padding:4px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 40%,transparent);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
   tr:hover td{background:var(--vscode-list-hoverBackground)}
   td.null{color:var(--vscode-descriptionForeground);font-style:italic}
+  td.editing{padding:0!important}
+  .cell-edit-input{width:100%;height:100%;background:var(--ob-bg2,#1c1535);color:var(--ob-text,#ede8f8);border:1px solid var(--ob-purple,#b44fff)!important;font-size:12px;font-family:inherit;padding:3px 8px;outline:none}
   :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   .header{background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10))!important;border-bottom:1px solid var(--ob-border)!important}
@@ -1568,6 +1690,16 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .msg-box{background:rgba(180,79,255,.10)!important;border-color:var(--ob-border)!important;color:var(--ob-purple)!important}
   .spinner{border-color:var(--ob-purple)!important;border-top-color:transparent!important}
   .editor-loading{color:var(--ob-dim)!important}
+  #history-panel{flex:1;overflow:auto;display:flex;flex-direction:column;background:var(--ob-bg0)}
+  .history-toolbar{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--ob-dim);border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
+  #history-list{flex:1;overflow:auto}
+  .history-item{padding:8px 12px;border-bottom:1px solid rgba(180,79,255,.07);cursor:pointer;display:flex;flex-direction:column;gap:4px}
+  .history-item:hover{background:rgba(180,79,255,.07)}
+  .history-preview{font-family:monospace;font-size:11px;color:var(--ob-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-meta{font-size:10px;color:var(--ob-dim);display:flex;gap:8px;align-items:center}
+  .history-pin{margin-left:auto;font-size:10px!important;padding:1px 6px!important;opacity:0;transition:opacity .15s}
+  .history-item:hover .history-pin{opacity:1}
+  .history-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
 </style>
 </head>
 <body>
@@ -1583,11 +1715,20 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <button id="run-btn" class="btn btn-primary">&#x25B6; Run</button>
   <button id="cancel-btn" class="btn btn-cancel hidden">&#x2715; Cancel</button>
   <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save&hellip;</button>
+  <button id="history-btn" class="btn btn-secondary" title="Show query history">History</button>
+  <button id="specialist-btn" class="btn btn-secondary" title="Send query to Specialist">&#x2192; Specialist</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
 <div id="results" class="results">
   <p class="placeholder">Write a query above and press Run or F8</p>
+</div>
+<div id="history-panel" class="hidden">
+  <div class="history-toolbar">
+    <span>Query history</span>
+    <button id="clear-history-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
+  </div>
+  <div id="history-list"><p class="history-empty">No history yet.</p></div>
 </div>
 <script src="${monacoBase}/loader.js"></script>
 <script nonce="${nonce}">
@@ -1603,6 +1744,8 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   var runTimeoutId = null;
   var editor = null;
   var pendingLoad = null;
+  var historyEntries = [];
+  var historyVisible = false;
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -1613,8 +1756,83 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     var sql = editor ? editor.getValue() : '';
     if (sql.trim()) vscode.postMessage({ command: 'saveScript', sql: sql });
   });
+  document.getElementById('history-btn').addEventListener('click', function() {
+    toggleHistory();
+  });
+  document.getElementById('clear-history-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'clearHistory' });
+  });
+  document.getElementById('history-list').addEventListener('click', function(e) {
+    var pin = e.target.closest('.history-pin');
+    if (pin) {
+      var idx = parseInt(pin.getAttribute('data-idx'), 10);
+      var entry = historyEntries[idx];
+      if (entry) vscode.postMessage({ command: 'saveScript', sql: entry.sql });
+      return;
+    }
+    var item = e.target.closest('.history-item');
+    if (item) {
+      var idx2 = parseInt(item.getAttribute('data-idx'), 10);
+      var entry2 = historyEntries[idx2];
+      if (entry2) {
+        if (editor) {
+          editor.setValue(entry2.sql);
+          editor.setPosition({ lineNumber: 1, column: 1 });
+        } else {
+          pendingLoad = entry2.sql;
+        }
+        if (historyVisible) toggleHistory();
+      }
+    }
+  });
+  document.getElementById('specialist-btn').addEventListener('click', function() {
+    var sql = editor ? editor.getValue() : '';
+    var sel = editor ? editor.getSelection() : null;
+    if (sel && !sel.isEmpty()) sql = editor.getModel().getValueInRange(sel);
+    if (sql.trim()) vscode.postMessage({ command: 'sendToSpecialist', sql: sql });
+  });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
+  });
+  document.getElementById('results').addEventListener('dblclick', function(e) {
+    var td = e.target.closest('td');
+    if (!td) return;
+    var c = parseInt(td.getAttribute('data-c'), 10);
+    if (isNaN(c) || c === 0) return;
+    var r = parseInt(td.getAttribute('data-r'), 10);
+    if (isNaN(r)) return;
+    var sql = editor ? editor.getValue() : '';
+    var tableMatch = sql.match(/\\bFROM\\s+([\\w\\."\`\\[\\]]+)/i);
+    if (!tableMatch) return;
+    var tableName = tableMatch[1].replace(/["\`\\[\\]]/g, '');
+    var keyCol = lastColumns[0];
+    var keyVal = lastRows[r] ? String(lastRows[r][0]) : '';
+    var colName = lastColumns[c];
+    var origVal = td.textContent;
+    td.classList.add('editing');
+    td.innerHTML = '';
+    var inp = document.createElement('input');
+    inp.className = 'cell-edit-input';
+    inp.value = origVal === 'NULL' ? '' : origVal;
+    td.appendChild(inp);
+    inp.focus();
+    inp.select();
+    function commit() {
+      var newVal = inp.value;
+      td.classList.remove('editing');
+      td.textContent = newVal;
+      vscode.postMessage({ command: 'editCell', table: tableName, keyColumn: keyCol, keyValue: keyVal, column: colName, newValue: newVal });
+    }
+    function cancel() {
+      td.classList.remove('editing');
+      td.textContent = origVal;
+    }
+    inp.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      else if (ev.key === 'Tab') { ev.preventDefault(); commit(); }
+    });
+    inp.addEventListener('blur', function() { cancel(); });
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); run(); }
@@ -1741,6 +1959,11 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerRun') { run(); return; }
+    if (m.command === 'loadHistory') {
+      historyEntries = m.entries || [];
+      renderHistory();
+      return;
+    }
     if (m.command === 'loadScript') {
       if (editor) {
         editor.setValue(m.content || '');
@@ -1767,6 +1990,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       running = false;
       document.getElementById('run-btn').classList.remove('hidden');
       document.getElementById('cancel-btn').classList.add('hidden');
+      if (historyVisible) toggleHistory();
       var elapsed = ((Date.now() - t0) / 1000).toFixed(2) + 's';
       renderResult(m.columns, m.rows, m.message, elapsed);
     } else if (m.command === 'error') {
@@ -1810,7 +2034,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       for (var c = 0; c < columns.length; c++) {
         var val = (rows[r] && rows[r][c] != null) ? rows[r][c] : '';
         var isNull = val === 'NULL';
-        tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '">'
+        tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '" data-r="' + r + '" data-c="' + c + '">'
              + (isNull ? 'NULL' : esc(val)) + '</td>';
       }
       tbl += '</tr>';
@@ -1822,6 +2046,38 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     var res = document.getElementById('results');
     res.innerHTML = '';
     res.appendChild(wrap);
+  }
+
+  function toggleHistory() {
+    historyVisible = !historyVisible;
+    document.getElementById('history-panel').classList.toggle('hidden', !historyVisible);
+    document.getElementById('results').classList.toggle('hidden', historyVisible);
+    document.getElementById('history-btn').textContent = historyVisible ? '« Results' : 'History';
+  }
+
+  function renderHistory() {
+    var list = document.getElementById('history-list');
+    if (!historyEntries.length) {
+      list.innerHTML = '\x3cp class="history-empty">No history yet.\x3c/p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < historyEntries.length; i++) {
+      var e = historyEntries[i];
+      var preview = e.sql.replace(/\\s+/g, ' ').slice(0, 80);
+      var ts = new Date(e.timestamp).toLocaleString();
+      var rows = e.rowCount + ' row' + (e.rowCount !== 1 ? 's' : '');
+      html += '\x3cdiv class="history-item" data-idx="' + i + '">'
+            + '\x3cdiv class="history-preview">' + esc(preview) + '\x3c/div>'
+            + '\x3cdiv class="history-meta">'
+            + '\x3cspan>' + esc(ts) + '\x3c/span>'
+            + '\x3cspan>' + esc(e.connectionLabel) + '\x3c/span>'
+            + '\x3cspan>' + rows + '\x3c/span>'
+            + '\x3cbutton class="btn btn-secondary history-pin" data-idx="' + i + '" title="Save to script library">Pin\x3c/button>'
+            + '\x3c/div>'
+            + '\x3c/div>';
+    }
+    list.innerHTML = html;
   }
 
   function setStatus(html) { document.getElementById('status').innerHTML = html; }
@@ -1936,14 +2192,30 @@ async function httpRunner(): Promise<void> {
     const httpNonce = getNonce();
     httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
 
+    if (cwd) {
+        const envsPattern = new vscode.RelativePattern(cwd, '.openbase/http-runner/envs/*.json');
+        const envsWatcher = vscode.workspace.createFileSystemWatcher(envsPattern);
+        const refreshEnvs = () => {
+            const envs = loadEnvFiles();
+            const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+            httpPanel?.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
+        };
+        envsWatcher.onDidCreate(refreshEnvs);
+        envsWatcher.onDidDelete(refreshEnvs);
+        envsWatcher.onDidChange(refreshEnvs);
+        httpPanel.onDidDispose(() => envsWatcher.dispose());
+    }
+
     httpPanel.webview.onDidReceiveMessage(async (msg: {
         command: string;
         method?: string;
         url?: string;
         headers?: Array<{name: string; value: string}> | Record<string, string>;
+        headersArray?: Array<{name: string; value: string}>;
         bodyType?: string;
         body?: string;
         authToken?: string;
+        filename?: string;
     }) => {
         if (msg.command === 'ready') {
             if (httpPendingRequest) {
@@ -1951,6 +2223,40 @@ async function httpRunner(): Promise<void> {
                 httpPendingRequest = undefined;
                 httpPanel?.webview.postMessage({ command: 'loadRequest', ...pending });
             }
+            const httpHistory = extContext?.globalState.get<HttpHistoryEntry[]>(HTTP_HISTORY_KEY) ?? [];
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: httpHistory });
+            const envs = loadEnvFiles();
+            const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+            httpPanel?.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
+            return;
+        }
+
+        if (msg.command === 'setEnv') {
+            await extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, msg.filename ?? '');
+            return;
+        }
+
+        if (msg.command === 'newEnv') {
+            const dir = getEnvsDir();
+            if (!dir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+            const name = await vscode.window.showInputBox({
+                prompt: 'Environment name',
+                placeHolder: 'Development',
+                validateInput: v => v?.trim() ? undefined : 'Name required',
+            });
+            if (!name?.trim()) return;
+            const filename = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '.json';
+            const filepath = path.join(dir, filename);
+            if (fs.existsSync(filepath)) { vscode.window.showErrorMessage(`Environment "${filename}" already exists.`); return; }
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(filepath, JSON.stringify({ name: name.trim(), variables: { baseUrl: 'http://localhost:5000', token: '' } }, null, 2), 'utf-8');
+            await vscode.window.showTextDocument(vscode.Uri.file(filepath));
+            return;
+        }
+
+        if (msg.command === 'clearHttpHistory') {
+            await extContext?.globalState.update(HTTP_HISTORY_KEY, []);
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: [] });
             return;
         }
 
@@ -1975,9 +2281,46 @@ async function httpRunner(): Promise<void> {
         if (msg.command !== 'send') return;
         const { method = 'GET', url = '', body } = msg;
         const headers = (Array.isArray(msg.headers) ? {} : msg.headers) ?? {};
+
+        const activeEnvFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        let envVars: Record<string, string> = {};
+        if (activeEnvFilename) {
+            const dir = getEnvsDir();
+            if (dir) {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(dir, activeEnvFilename), 'utf-8')) as HttpEnvFile;
+                    envVars = data.variables ?? {};
+                } catch { /* ignore */ }
+            }
+        }
+        const resolvedUrl = resolveEnvVars(url, envVars);
+        const resolvedHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(headers as Record<string, string>)) {
+            resolvedHeaders[resolveEnvVars(k, envVars)] = resolveEnvVars(v, envVars);
+        }
+        const resolvedBody = body ? resolveEnvVars(body, envVars) : body;
+
         try {
-            const result = await doHttpRequest(method, url, headers as Record<string, string>, body);
+            const result = await doHttpRequest(method, resolvedUrl, resolvedHeaders, resolvedBody);
             httpPanel?.webview.postMessage({ command: 'response', ...result });
+
+            const prevHistory = extContext?.globalState.get<HttpHistoryEntry[]>(HTTP_HISTORY_KEY) ?? [];
+            const histEntry: HttpHistoryEntry = {
+                timestamp: Date.now(),
+                method,
+                url,
+                headers: msg.headersArray ?? [],
+                bodyType: msg.bodyType ?? 'none',
+                body: msg.body ?? '',
+                authToken: msg.authToken ?? '',
+                statusCode: result.status,
+                statusText: result.statusText,
+                responseBody: result.body,
+                responseTimeMs: result.time,
+            };
+            const updatedHistory = [histEntry, ...prevHistory].slice(0, HTTP_HISTORY_LIMIT);
+            await extContext?.globalState.update(HTTP_HISTORY_KEY, updatedHistory);
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: updatedHistory });
         } catch (e: unknown) {
             httpPanel?.webview.postMessage({ command: 'error', text: e instanceof Error ? e.message : String(e) });
         }
@@ -2101,38 +2444,83 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   .status-badge.s5xx{background:rgba(255,40,40,.15)!important;color:#ff7070!important;border-color:rgba(255,40,40,.3)!important}
   .status-badge.s3xx{background:rgba(255,200,60,.12)!important;color:#ffd060!important;border-color:rgba(255,200,60,.25)!important}
   #copy-btn{background:rgba(180,79,255,.12)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border)!important}
+  #http-history-panel{flex:1;overflow:auto;display:flex;flex-direction:column;background:var(--ob-bg0)}
+  .http-hist-toolbar{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--ob-dim);border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
+  #http-history-list{flex:1;overflow:auto}
+  .http-hist-item{border-bottom:1px solid rgba(180,79,255,.07)}
+  .http-hist-row{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer}
+  .http-hist-row:hover{background:rgba(180,79,255,.07)}
+  .http-method-badge{font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;flex-shrink:0;font-family:monospace}
+  .mb-GET{background:rgba(80,220,80,.15);color:#6fdc8f;border:1px solid rgba(80,220,80,.2)}
+  .mb-POST{background:rgba(180,140,60,.15);color:#ddb86f;border:1px solid rgba(180,140,60,.25)}
+  .mb-PUT{background:rgba(80,150,200,.15);color:#6fbfdc;border:1px solid rgba(80,150,200,.25)}
+  .mb-PATCH{background:rgba(160,80,200,.15);color:#c06fdc;border:1px solid rgba(160,80,200,.25)}
+  .mb-DELETE{background:rgba(255,63,100,.15);color:#ff7090;border:1px solid rgba(255,63,100,.25)}
+  .mb-OTHER{background:rgba(150,150,150,.12);color:#aaa;border:1px solid rgba(150,150,150,.2)}
+  .http-hist-url{flex:1;font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ob-text)}
+  .http-hist-meta{display:flex;align-items:center;gap:6px;flex-shrink:0}
+  .http-hist-time{font-size:10px;color:var(--ob-dim)}
+  .http-hist-ts{font-size:10px;color:var(--ob-dim)}
+  .http-hist-actions{display:flex;gap:4px;margin-left:2px}
+  .http-hist-actions .btn{font-size:10px!important;padding:1px 6px!important}
+  .http-hist-expand{background:transparent;border:none;cursor:pointer;color:var(--ob-dim);font-size:11px;padding:0 3px}
+  .http-hist-body{padding:8px 12px;border-top:1px solid rgba(180,79,255,.07);background:var(--ob-bg1)}
+  .http-hist-body pre{font-size:11px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .http-hist-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
+  .curl-modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:1000}
+  .curl-modal-inner{background:var(--ob-bg1);border:1px solid var(--ob-border);padding:16px;width:90%;max-width:520px;display:flex;flex-direction:column;gap:10px;border-radius:4px}
+  .curl-modal-title{font-size:13px;font-weight:600;color:var(--ob-purple)}
+  #curl-input{height:120px;resize:vertical;font-family:monospace;font-size:11px;width:100%}
+  .curl-modal-actions{display:flex;gap:8px;justify-content:flex-end}
+  .env-bar{display:flex;align-items:center;gap:8px;padding:3px 12px;border-bottom:1px solid var(--ob-border);flex-shrink:0;background:var(--ob-bg1);font-size:11px}
+  .env-label{color:var(--ob-dim)}
+  #env-select{background:var(--ob-bg2)!important;color:var(--ob-text)!important;border:1px solid var(--ob-border)!important;padding:2px 6px;font-size:11px;border-radius:3px;max-width:160px}
+  .env-var-count{font-size:10px;color:var(--ob-dim)}
 </style>
 </head>
 <body>
 
 <!-- URL BAR -->
 <div class="url-bar">
-  <select id="method" onchange="onMethodChange(this)">
+  <select id="method">
     <option>GET</option><option>POST</option><option>PUT</option>
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
   <button id="send-btn" class="btn btn-primary">▶ Send</button>
   <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
+  <button id="import-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Import from cURL command">↓ cURL</button>
+  <button id="copy-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Copy as cURL">↑ cURL</button>
+  <button id="http-history-btn" class="btn btn-secondary" title="Show request history">History</button>
+</div>
+
+<!-- ENV BAR -->
+<div class="env-bar">
+  <span class="env-label">Env</span>
+  <select id="env-select">
+    <option value="">— none —</option>
+  </select>
+  <span id="env-var-count" class="env-var-count"></span>
+  <button id="new-env-btn" class="btn btn-secondary" style="margin-left:auto;font-size:10px;padding:1px 8px" title="Create new environment file">+ New Env</button>
 </div>
 
 <!-- REQUEST TABS -->
 <div class="req-section">
   <div class="tab-strip">
-    <div class="tab active" onclick="reqTab(this,'headers')">Headers</div>
-    <div class="tab" onclick="reqTab(this,'body')">Body</div>
-    <div class="tab" onclick="reqTab(this,'auth')">Auth</div>
+    <div class="tab active" data-tab="headers">Headers</div>
+    <div class="tab" data-tab="body">Body</div>
+    <div class="tab" data-tab="auth">Auth</div>
   </div>
 
   <div id="req-headers" class="tab-content">
     <div id="headers-list"></div>
-    <button class="btn btn-secondary" style="margin-top:4px" onclick="addHeader('','')">+ Add Header</button>
+    <button id="add-header-btn" class="btn btn-secondary" style="margin-top:4px">+ Add Header</button>
   </div>
 
   <div id="req-body" class="tab-content hidden">
     <div class="body-toolbar">
       <span>Body:</span>
-      <select id="body-type" onchange="onBodyType()">
+      <select id="body-type">
         <option value="none">none</option>
         <option value="json">JSON</option>
         <option value="text">Text</option>
@@ -2146,7 +2534,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <p class="auth-label">Bearer Token — automatically added as Authorization header on send</p>
     <input id="auth-token" type="password" style="width:100%" placeholder="eyJhbGci...">
     <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
-      <input id="auth-show" type="checkbox" style="width:auto" onchange="document.getElementById('auth-token').type=this.checked?'text':'password'">
+      <input id="auth-show" type="checkbox" style="width:auto">
       <label for="auth-show" style="font-size:11px;cursor:pointer">Show token</label>
     </div>
   </div>
@@ -2158,18 +2546,46 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <span class="placeholder-msg">Send a request to see the response</span>
   </div>
   <div class="tab-strip hidden" id="res-tab-strip">
-    <div class="tab active" onclick="resTab(this,'body')">Body</div>
-    <div class="tab" onclick="resTab(this,'headers')">Headers</div>
+    <div class="tab active" data-tab="body">Body</div>
+    <div class="tab" data-tab="headers">Headers</div>
   </div>
   <div class="res-body-wrap" id="res-body-wrap"></div>
   <div class="res-body-wrap hidden" id="res-headers-wrap"></div>
 </div>
 
+<div id="curl-modal" class="curl-modal hidden">
+  <div class="curl-modal-inner">
+    <div class="curl-modal-title">Import cURL</div>
+    <textarea id="curl-input" placeholder="curl -X POST https://api.example.com/users \&#10;  -H 'Authorization: Bearer ...' \&#10;  -d '{&quot;key&quot;: &quot;value&quot;}'"></textarea>
+    <div class="curl-modal-actions">
+      <button id="curl-import-cancel" class="btn btn-secondary">Cancel</button>
+      <button id="curl-import-ok" class="btn btn-primary">Import</button>
+    </div>
+  </div>
+</div>
+
+<div id="http-history-panel" class="hidden">
+  <div class="http-hist-toolbar">
+    <span>Request history</span>
+    <button id="http-clear-hist-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
+  </div>
+  <div id="http-history-list"><p class="http-hist-empty">No history yet.</p></div>
+</div>
+
 <script nonce="${nonce}">
+  window.onerror = function(msg, src, line, col) {
+    var box = document.createElement('div');
+    box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#c72e0f;color:#fff;padding:6px 10px;font-size:12px;font-family:monospace;z-index:9999;white-space:pre-wrap';
+    box.textContent = 'JS ERROR: ' + msg + '\\n' + src + ':' + line + ':' + col;
+    document.body.appendChild(box);
+  };
   const vscode = acquireVsCodeApi();
   vscode.postMessage({ command: 'ready' });
   let sending = false;
   const BASE_URL = ${safeBase};
+  var httpHistory = [];
+  var httpHistoryVisible = false;
+  var historyExpanded = {};
 
   // init
   if (BASE_URL) document.getElementById('url-input').value = BASE_URL + '/api/';
@@ -2194,11 +2610,90 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
       authToken: document.getElementById('auth-token').value.trim()
     });
   });
+  document.getElementById('import-curl-btn').addEventListener('click', function() {
+    document.getElementById('curl-modal').classList.remove('hidden');
+    document.getElementById('curl-input').value = '';
+    setTimeout(function() { document.getElementById('curl-input').focus(); }, 50);
+  });
+  document.getElementById('curl-import-cancel').addEventListener('click', function() {
+    document.getElementById('curl-modal').classList.add('hidden');
+  });
+  document.getElementById('curl-import-ok').addEventListener('click', function() {
+    var parsed = parseCurl(document.getElementById('curl-input').value);
+    if (parsed && parsed.url) {
+      loadHistoryEntry(parsed);
+      document.getElementById('curl-modal').classList.add('hidden');
+    }
+  });
+  document.getElementById('copy-curl-btn').addEventListener('click', function() {
+    var curl = buildCurl();
+    if (!curl) return;
+    navigator.clipboard.writeText(curl).then(function() {
+      var btn = document.getElementById('copy-curl-btn');
+      btn.textContent = '✓ ok';
+      setTimeout(function() { btn.textContent = '↑ cURL'; }, 1500);
+    });
+  });
+  document.getElementById('env-select').addEventListener('change', function() {
+    vscode.postMessage({ command: 'setEnv', filename: this.value });
+  });
+  document.getElementById('new-env-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'newEnv' });
+  });
+  document.getElementById('http-history-btn').addEventListener('click', function() {
+    toggleHttpHistory();
+  });
+  document.getElementById('http-clear-hist-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'clearHttpHistory' });
+  });
+  document.getElementById('http-history-list').addEventListener('click', function(e) {
+    var loadBtn = e.target.closest('.hist-load-btn');
+    if (loadBtn) {
+      var idx = parseInt(loadBtn.getAttribute('data-idx'), 10);
+      loadHistoryEntry(httpHistory[idx]);
+      if (httpHistoryVisible) toggleHttpHistory();
+      return;
+    }
+    var resendBtn = e.target.closest('.hist-resend-btn');
+    if (resendBtn) {
+      var idx2 = parseInt(resendBtn.getAttribute('data-idx'), 10);
+      loadHistoryEntry(httpHistory[idx2]);
+      if (httpHistoryVisible) toggleHttpHistory();
+      setTimeout(function() { sendRequest(); }, 50);
+      return;
+    }
+    var saveBtn = e.target.closest('.hist-save-btn');
+    if (saveBtn) {
+      var idx3 = parseInt(saveBtn.getAttribute('data-idx'), 10);
+      var entry = httpHistory[idx3];
+      if (entry) vscode.postMessage({ command: 'saveRequest', method: entry.method, url: entry.url, headers: entry.headers, bodyType: entry.bodyType, body: entry.body, authToken: entry.authToken });
+      return;
+    }
+    var row = e.target.closest('.http-hist-row');
+    if (row) {
+      var idx4 = parseInt(row.getAttribute('data-idx'), 10);
+      historyExpanded[idx4] = !historyExpanded[idx4];
+      renderHttpHistory();
+    }
+  });
   document.getElementById('url-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendRequest();
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); sendRequest(); }
+    if (e.key === 'Escape') document.getElementById('curl-modal').classList.add('hidden');
+  });
+  document.getElementById('method').addEventListener('change', function() { onMethodChange(this); });
+  document.getElementById('body-type').addEventListener('change', function() { onBodyType(); });
+  document.getElementById('add-header-btn').addEventListener('click', function() { addHeader('',''); });
+  document.getElementById('auth-show').addEventListener('change', function() {
+    document.getElementById('auth-token').type = this.checked ? 'text' : 'password';
+  });
+  document.querySelectorAll('.req-section .tab-strip .tab').forEach(function(tab) {
+    tab.addEventListener('click', function() { reqTab(this, this.getAttribute('data-tab')); });
+  });
+  document.querySelectorAll('#res-tab-strip .tab').forEach(function(tab) {
+    tab.addEventListener('click', function() { resTab(this, this.getAttribute('data-tab')); });
   });
 
   var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
@@ -2257,6 +2752,16 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     return h;
   }
 
+  function collectHeadersArray() {
+    var h = [];
+    document.getElementById('headers-list').querySelectorAll('.kv-row').forEach(function(r) {
+      var ins = r.querySelectorAll('input');
+      var k = ins[0].value.trim(), v = ins[1].value.trim();
+      if (k) h.push({ name: k, value: v });
+    });
+    return h;
+  }
+
   // \u2500\u2500 body type \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   function onBodyType() {
     var t = document.getElementById('body-type').value;
@@ -2282,7 +2787,9 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     }
 
     var method = document.getElementById('method').value;
-    var hdrs = collectHeaders();
+    var rawHdrsArr = collectHeadersArray();
+    var hdrs = {};
+    rawHdrsArr.forEach(function(h) { hdrs[h.name] = h.value; });
 
     var token = document.getElementById('auth-token').value.trim();
     if (token) hdrs['Authorization'] = 'Bearer ' + token;
@@ -2312,7 +2819,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     document.getElementById('res-body-wrap').classList.remove('hidden');
     document.getElementById('res-headers-wrap').classList.add('hidden');
 
-    vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, body: body });
+    vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, headersArray: rawHdrsArr, bodyType: bodyType, body: body || '', authToken: token });
 
     sendTimeoutId = setTimeout(function() {
       sending = false;
@@ -2325,25 +2832,34 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerSend') { sendRequest(); return; }
-    if (m.command === 'loadRequest') {
-      var sel = document.getElementById('method');
-      sel.value = m.method || 'GET';
-      onMethodChange(sel);
-      document.getElementById('url-input').value = m.url || '';
-      document.getElementById('headers-list').innerHTML = '';
-      (m.headers || []).forEach(function(h) { addHeader(h.name, h.value); });
-      var bt = document.getElementById('body-type');
-      bt.value = m.bodyType || 'none';
-      onBodyType();
-      document.getElementById('body-text').value = m.body || '';
-      document.getElementById('auth-token').value = m.authToken || '';
+    if (m.command === 'loadRequest') { loadHistoryEntry(m); return; }
+    if (m.command === 'loadEnvs') {
+      var sel = document.getElementById('env-select');
+      sel.innerHTML = '\x3coption value="">— none —\x3c/option>';
+      (m.envs || []).forEach(function(env) {
+        var opt = document.createElement('option');
+        opt.value = env.filename;
+        opt.textContent = env.name;
+        if (env.filename === m.activeFilename) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      var active = (m.envs || []).find(function(e) { return e.filename === m.activeFilename; });
+      document.getElementById('env-var-count').textContent = active ? active.varCount + ' var' + (active.varCount !== 1 ? 's' : '') : '';
+      return;
+    }
+    if (m.command === 'loadHttpHistory') {
+      httpHistory = m.entries || [];
+      historyExpanded = {};
+      renderHttpHistory();
       return;
     }
     clearSendTimeout();
     sending = false;
     document.getElementById('send-btn').disabled = false;
-    if (m.command === 'response') showResponse(m);
-    else if (m.command === 'error') showError(m.text);
+    if (m.command === 'response') {
+      if (httpHistoryVisible) toggleHttpHistory();
+      showResponse(m);
+    } else if (m.command === 'error') showError(m.text);
   });
 
   var lastRawBody = '';
@@ -2365,7 +2881,9 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
       '<span class="meta">' + m.time + ' ms</span>' +
       '<span class="meta">\u00b7</span>' +
       '<span class="meta">' + size + '</span>' +
-      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px" onclick="copyBody()">Copy</button>';
+      '<button id="copy-btn" class="btn btn-secondary" style="margin-left:auto;font-size:11px;padding:2px 8px">Copy</button>';
+    var cpBtn = document.getElementById('copy-btn');
+    if (cpBtn) cpBtn.addEventListener('click', copyBody);
     document.getElementById('res-tab-strip').classList.remove('hidden');
 
     // body
@@ -2400,6 +2918,126 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   }
 
   // \u2500\u2500 helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function uq(s) {
+    if (!s) return '';
+    if ((s[0] === "'" && s[s.length-1] === "'") || (s[0] === '"' && s[s.length-1] === '"')) return s.slice(1, -1);
+    return s;
+  }
+
+  function parseCurl(raw) {
+    if (!raw) return null;
+    var text = raw.replace(/\\\\\\r?\\n/g, ' ').replace(/\\s+/g, ' ').trim();
+    if (!/^curl\\b/i.test(text)) return null;
+    var method = 'GET', url = '', headers = [], body = '', bodyType = 'none', authToken = '';
+    var tokens = [], re = /(?:'[^']*'|"(?:\\\\.|[^"\\\\])*"|[^\\s]+)/g, m;
+    while ((m = re.exec(text)) !== null) tokens.push(m[0]);
+    var i = 0;
+    while (i < tokens.length) {
+      var t = tokens[i];
+      if (i === 0 && /^curl$/i.test(t)) { i++; continue; }
+      if (t === '-X' || t === '--request') {
+        method = uq(tokens[++i] || 'GET').toUpperCase();
+      } else if (t === '-H' || t === '--header') {
+        var hdr = uq(tokens[++i] || '');
+        var col = hdr.indexOf(':');
+        if (col > 0) {
+          var hn = hdr.slice(0, col).trim(), hv = hdr.slice(col + 1).trim();
+          if (hn.toLowerCase() === 'authorization' && hv.toLowerCase().startsWith('bearer ')) {
+            authToken = hv.slice(7).trim();
+          } else { headers.push({ name: hn, value: hv }); }
+        }
+      } else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary' || t === '--data-urlencode') {
+        body = uq(tokens[++i] || '');
+        var tb = body.trim();
+        bodyType = (tb[0] === '{' || tb[0] === '[') ? 'json' : (body.indexOf('=') !== -1 ? 'form' : 'text');
+        if (method === 'GET') method = 'POST';
+      } else if (!t.startsWith('-') && !url) {
+        url = uq(t);
+      }
+      i++;
+    }
+    return { method: method, url: url, headers: headers, body: body, bodyType: bodyType, authToken: authToken };
+  }
+
+  function buildCurl() {
+    var url = document.getElementById('url-input').value.trim();
+    if (!url) return null;
+    var method = document.getElementById('method').value;
+    var sq = function(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; };
+    var parts = ['curl'];
+    if (method !== 'GET') parts.push('-X ' + method);
+    parts.push(sq(url));
+    collectHeadersArray().forEach(function(h) { parts.push('-H ' + sq(h.name + ': ' + h.value)); });
+    var token = document.getElementById('auth-token').value.trim();
+    if (token) parts.push('-H ' + sq('Authorization: Bearer ' + token));
+    var bodyType = document.getElementById('body-type').value;
+    var body = document.getElementById('body-text').value;
+    if (bodyType !== 'none' && body) parts.push('-d ' + sq(body));
+    return parts.join(' \\\n  ');
+  }
+
+  function toggleHttpHistory() {
+    httpHistoryVisible = !httpHistoryVisible;
+    document.getElementById('http-history-panel').classList.toggle('hidden', !httpHistoryVisible);
+    document.querySelector('.req-section').classList.toggle('hidden', httpHistoryVisible);
+    document.querySelector('.res-section').classList.toggle('hidden', httpHistoryVisible);
+    document.getElementById('http-history-btn').textContent = httpHistoryVisible ? '« Back' : 'History';
+  }
+
+  function loadHistoryEntry(entry) {
+    if (!entry) return;
+    var sel = document.getElementById('method');
+    sel.value = entry.method || 'GET';
+    onMethodChange(sel);
+    document.getElementById('url-input').value = entry.url || '';
+    document.getElementById('headers-list').innerHTML = '';
+    (entry.headers || []).forEach(function(h) { addHeader(h.name, h.value); });
+    var bt = document.getElementById('body-type');
+    bt.value = entry.bodyType || 'none';
+    onBodyType();
+    document.getElementById('body-text').value = entry.body || '';
+    document.getElementById('auth-token').value = entry.authToken || '';
+  }
+
+  function renderHttpHistory() {
+    var list = document.getElementById('http-history-list');
+    if (!httpHistory.length) {
+      list.innerHTML = '\x3cp class="http-hist-empty">No history yet.\x3c/p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < httpHistory.length; i++) {
+      var e = httpHistory[i];
+      var m = (e.method || 'GET').toUpperCase();
+      var mCls = ['GET','POST','PUT','PATCH','DELETE'].indexOf(m) !== -1 ? 'mb-' + m : 'mb-OTHER';
+      var sc = e.statusCode || 0;
+      var scCls = sc >= 500 ? 's5xx' : sc >= 400 ? 's4xx' : sc >= 300 ? 's3xx' : 's2xx';
+      var ts = new Date(e.timestamp).toLocaleTimeString();
+      var expanded = !!historyExpanded[i];
+      html += '\x3cdiv class="http-hist-item">'
+            + '\x3cdiv class="http-hist-row" data-idx="' + i + '">'
+            + '\x3cspan class="http-method-badge ' + mCls + '">' + esc(m) + '\x3c/span>'
+            + '\x3cspan class="http-hist-url" title="' + esc(e.url || '') + '">' + esc(e.url || '') + '\x3c/span>'
+            + '\x3cdiv class="http-hist-meta">'
+            + '\x3cspan class="status-badge ' + scCls + '" style="font-size:10px;padding:1px 6px">' + sc + '\x3c/span>'
+            + '\x3cspan class="http-hist-time">' + e.responseTimeMs + ' ms\x3c/span>'
+            + '\x3cspan class="http-hist-ts">' + esc(ts) + '\x3c/span>'
+            + '\x3c/div>'
+            + '\x3cdiv class="http-hist-actions">'
+            + '\x3cbutton class="btn btn-secondary hist-load-btn" data-idx="' + i + '">Load\x3c/button>'
+            + '\x3cbutton class="btn btn-secondary hist-resend-btn" data-idx="' + i + '">Resend\x3c/button>'
+            + '\x3cbutton class="btn btn-secondary hist-save-btn" data-idx="' + i + '">Save\x3c/button>'
+            + '\x3cbutton class="http-hist-expand">' + (expanded ? '▼' : '▶') + '\x3c/button>'
+            + '\x3c/div>'
+            + '\x3c/div>';
+      if (expanded && e.responseBody) {
+        html += '\x3cdiv class="http-hist-body">\x3cpre>' + esc(e.responseBody.slice(0, 3000)) + '\x3c/pre>\x3c/div>';
+      }
+      html += '\x3c/div>';
+    }
+    list.innerHTML = html;
+  }
+
   function flatHeader(hdrs, name) {
     var v = hdrs[name] || hdrs[name.split('-').map(function(p,i){return i===0?p:p[0].toUpperCase()+p.slice(1);}).join('-')];
     return Array.isArray(v) ? v[0] : (v || '');
@@ -2507,8 +3145,22 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     private state: 'idle' | 'loading' | 'error' | 'noconn' = 'idle';
     private errorMsg = '';
     private treeView?: vscode.TreeView<SqlTableItem>;
+    filterText = '';
 
     setTreeView(tv: vscode.TreeView<SqlTableItem>): void { this.treeView = tv; }
+
+    setFilter(text: string): void {
+        this.filterText = text.toLowerCase().trim();
+        const total = Array.from(this.schemas.values()).reduce((s, v) => s + v.tables.length, 0);
+        if (this.filterText) {
+            const matches = Array.from(this.schemas.values())
+                .reduce((s, v) => s + v.tables.filter(t => t.toLowerCase().includes(this.filterText)).length, 0);
+            if (this.treeView) this.treeView.description = `${matches}/${total} tables`;
+        } else {
+            if (this.treeView) this.treeView.description = undefined;
+        }
+        this._onDidChangeTreeData.fire();
+    }
 
     async refresh(): Promise<void> {
         this.schemas.clear();
@@ -2549,11 +3201,14 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
 
         if (!element) {
             if (this.schemas.size === 0) return [];
+            const filter = this.filterText;
             return Array.from(this.schemas.entries())
                 .sort(([a], [b]) => a.localeCompare(b))
+                .filter(([, { tables }]) => !filter || tables.some(t => t.toLowerCase().includes(filter)))
                 .map(([schema, { tables }]) => {
-                    const item = new SqlTableItem('schema', `${schema}  (${tables.length})`);
-                    (item as SqlTableItem & { _schema: string })._schema = schema;
+                    const count = filter ? tables.filter(t => t.toLowerCase().includes(filter)).length : tables.length;
+                    const item = new SqlTableItem('schema', `${schema}  (${count})`);
+                    if (filter) item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
                     return item;
                 });
         }
@@ -2562,7 +3217,9 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
             const schemaName = (element.label as string).replace(/\s+\(\d+\)$/, '');
             const entry = this.schemas.get(schemaName);
             if (!entry) return [];
-            return entry.tables.map(t => new SqlTableItem('table', t, schemaName, entry.dbType));
+            const filter = this.filterText;
+            const tables = filter ? entry.tables.filter(t => t.toLowerCase().includes(filter)) : entry.tables;
+            return tables.map(t => new SqlTableItem('table', t, schemaName, entry.dbType));
         }
         return [];
     }
@@ -3360,6 +4017,20 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
             }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.erDiagram', () => openErDiagram()),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.filter', () => {
+            const inputBox = vscode.window.createInputBox();
+            inputBox.placeholder = 'Filter tables...';
+            inputBox.value = sqlTableProvider?.filterText ?? '';
+            inputBox.onDidChangeValue(text => sqlTableProvider?.setFilter(text));
+            inputBox.onDidAccept(() => inputBox.hide());
+            inputBox.onDidHide(() => inputBox.dispose());
+            inputBox.show();
+        }),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.clearFilter', () => {
+            sqlTableProvider?.setFilter('');
+        }),
     );
 
     sqlTableProvider.refresh();
@@ -3524,6 +4195,213 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── OpenAPI / Swagger import ─────────────────────────────────────────────────
+
+interface OApiSchema {
+    type?: string;
+    properties?: Record<string, OApiSchema>;
+    additionalProperties?: OApiSchema | boolean;
+    items?: OApiSchema;
+    $ref?: string;
+    example?: unknown;
+    enum?: unknown[];
+    format?: string;
+    allOf?: OApiSchema[];
+    oneOf?: OApiSchema[];
+    anyOf?: OApiSchema[];
+}
+
+interface OApiOperation {
+    operationId?: string;
+    summary?: string;
+    parameters?: Array<{ name: string; in: string; required?: boolean; schema?: OApiSchema; type?: string }>;
+    requestBody?: { content?: Record<string, { schema?: OApiSchema }>; required?: boolean };
+    security?: Array<Record<string, string[]>>;
+    tags?: string[];
+}
+
+interface OApiSpec {
+    swagger?: string;
+    openapi?: string;
+    info?: { title?: string; version?: string };
+    servers?: Array<{ url: string }>;
+    host?: string;
+    basePath?: string;
+    schemes?: string[];
+    paths?: Record<string, Record<string, OApiOperation>>;
+    components?: { schemas?: Record<string, OApiSchema>; securitySchemes?: Record<string, unknown> };
+    definitions?: Record<string, OApiSchema>;
+    securityDefinitions?: Record<string, unknown>;
+}
+
+function oapiSanitizeFilename(name: string): string {
+    return name.replace(/[^a-zA-Z0-9_\-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 80) || 'request';
+}
+
+function oapiResolveRef(ref: string, spec: OApiSpec): OApiSchema | undefined {
+    const parts = ref.replace(/^#\//, '').split('/');
+    let cur: Record<string, unknown> = spec as unknown as Record<string, unknown>;
+    for (const p of parts) { cur = cur?.[p] as Record<string, unknown>; }
+    return cur as OApiSchema | undefined;
+}
+
+function oapiSchemaToExample(schema: OApiSchema | undefined, spec: OApiSpec, depth = 0): unknown {
+    if (!schema || depth > 4) return null;
+    if (schema.$ref) {
+        const resolved = oapiResolveRef(schema.$ref, spec);
+        return oapiSchemaToExample(resolved, spec, depth + 1);
+    }
+    if (schema.example !== undefined) return schema.example;
+    if (schema.enum?.length) return schema.enum[0];
+    const merged: OApiSchema = schema.allOf?.length
+        ? schema.allOf.reduce((acc, s) => {
+            const r = schema.$ref ? oapiResolveRef(schema.$ref, spec) ?? s : s;
+            return { ...acc, properties: { ...acc.properties, ...(r.properties ?? {}) }, type: acc.type ?? r.type };
+          }, {} as OApiSchema)
+        : (schema.oneOf?.[0] ?? schema.anyOf?.[0] ?? schema);
+    const s = merged.$ref ? (oapiResolveRef(merged.$ref, spec) ?? merged) : merged;
+    switch (s.type) {
+        case 'object': {
+            if (!s.properties) return {};
+            const obj: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(s.properties)) obj[k] = oapiSchemaToExample(v, spec, depth + 1);
+            return obj;
+        }
+        case 'array': return [oapiSchemaToExample(s.items, spec, depth + 1)];
+        case 'integer': return 0;
+        case 'number': return 0.0;
+        case 'boolean': return false;
+        case 'string':
+            if (s.format === 'date-time') return new Date().toISOString();
+            if (s.format === 'date') return new Date().toISOString().slice(0, 10);
+            if (s.format === 'uuid') return '00000000-0000-0000-0000-000000000000';
+            return 'string';
+        default: return null;
+    }
+}
+
+async function importSwaggerToHttpRunner(): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: { 'OpenAPI / Swagger (JSON)': ['json'] },
+        title: 'Select OpenAPI / Swagger JSON file',
+    });
+    if (!uris?.length) return;
+
+    const reqDir = getRequestsDir();
+    if (!reqDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+
+    let spec: OApiSpec;
+    try {
+        spec = JSON.parse(fs.readFileSync(uris[0].fsPath, 'utf-8'));
+    } catch {
+        vscode.window.showErrorMessage('Failed to parse JSON. Only JSON format is supported (not YAML).');
+        return;
+    }
+
+    if (!spec.paths || typeof spec.paths !== 'object') {
+        vscode.window.showErrorMessage('No "paths" found in the OpenAPI/Swagger spec.');
+        return;
+    }
+
+    const isSwagger2 = !!spec.swagger;
+    const apiTitle = spec.info?.title ?? 'api';
+    const folderName = oapiSanitizeFilename(apiTitle);
+
+    let baseUrl = '';
+    if (isSwagger2) {
+        const scheme = spec.schemes?.[0] ?? 'https';
+        const host = spec.host ?? 'localhost';
+        const base = spec.basePath ?? '';
+        baseUrl = `${scheme}://${host}${base}`;
+    } else {
+        baseUrl = spec.servers?.[0]?.url ?? '';
+    }
+    baseUrl = baseUrl.replace(/\/$/, '');
+
+    const globalSecurity = (spec as unknown as Record<string, unknown>)['security'] as Array<Record<string, string[]>> | undefined;
+    const secDefs = spec.components?.securitySchemes ?? spec.securityDefinitions ?? {};
+    function hasBearerSecurity(opSecurity?: Array<Record<string, string[]>>): boolean {
+        const sec = opSecurity ?? globalSecurity ?? [];
+        return sec.some(s => Object.keys(s).some(k => {
+            const def = (secDefs as Record<string, unknown>)[k] as Record<string, unknown> | undefined;
+            return def && (def['type'] === 'http' && def['scheme'] === 'bearer'
+                || def['type'] === 'oauth2'
+                || def['type'] === 'apiKey' && def['in'] === 'header' && String(def['name'] ?? '').toLowerCase() === 'authorization');
+        }));
+    }
+
+    const targetDir = path.join(reqDir, folderName);
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'];
+    let created = 0;
+
+    for (const [apiPath, pathItem] of Object.entries(spec.paths)) {
+        for (const method of httpMethods) {
+            const op = pathItem[method] as OApiOperation | undefined;
+            if (!op) continue;
+
+            const pathForUrl = apiPath.replace(/\{([^}]+)\}/g, '{{$1}}');
+            const url = baseUrl + pathForUrl;
+
+            const headers: Array<{ name: string; value: string }> = [];
+            let bodyType = 'none';
+            let body = '';
+            let authToken = '';
+
+            if (hasBearerSecurity(op.security)) {
+                authToken = '{{token}}';
+            }
+
+            if (op.requestBody?.content) {
+                const contentTypes = Object.keys(op.requestBody.content);
+                const jsonType = contentTypes.find(t => t.includes('json')) ?? contentTypes[0];
+                if (jsonType) {
+                    const schema = op.requestBody.content[jsonType]?.schema;
+                    if (jsonType.includes('json')) {
+                        bodyType = 'json';
+                        const example = oapiSchemaToExample(schema, spec);
+                        body = JSON.stringify(example, null, 2);
+                        headers.push({ name: 'Content-Type', value: 'application/json' });
+                    } else if (jsonType.includes('form')) {
+                        bodyType = 'form';
+                    } else {
+                        bodyType = 'text';
+                    }
+                }
+            }
+
+            const queryParams = (op.parameters ?? []).filter(p => p.in === 'query');
+            let finalUrl = url;
+            if (queryParams.length) {
+                const qs = queryParams.map(p => `${p.name}={{${p.name}}}`).join('&');
+                finalUrl = url + '?' + qs;
+            }
+
+            const data: HttpRequestData = {
+                method: method.toUpperCase(),
+                url: finalUrl,
+                headers,
+                bodyType,
+                body,
+                authToken,
+            };
+
+            const opId = op.operationId?.trim();
+            const fallback = `${method.toUpperCase()}_${apiPath.replace(/\//g, '_').replace(/[{}]/g, '').replace(/^_/, '')}`;
+            const filename = oapiSanitizeFilename(opId || fallback) + '.json';
+            const filePath = path.join(targetDir, filename);
+
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+            created++;
+        }
+    }
+
+    httpRequestProvider?.refresh();
+    vscode.window.showInformationMessage(`Imported ${created} request${created !== 1 ? 's' : ''} from "${apiTitle}" into "${folderName}".`);
+}
+
 // ─── HTTP request library ─────────────────────────────────────────────────────
 
 const HTTP_REQUESTS_SUBDIR = path.join('.openbase', 'http-runner', 'requests');
@@ -3677,6 +4555,9 @@ function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
                 else fs.unlinkSync(item.fsPath);
                 httpRequestProvider?.refresh();
             }),
+
+        vscode.commands.registerCommand('openbase.httpRunner.requests.importSwagger',
+            () => importSwaggerToHttpRunner()),
     );
 }
 
@@ -3708,6 +4589,7 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
 // ─── activate ────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
+    extContext = context;
     panelProvider = new OpenBasePanelProvider();
     setupStatusBar(context);
     setupSqlTableBrowser(context);
