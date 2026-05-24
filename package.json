@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.7",
+  "version": "10.3.8",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -40,6 +40,11 @@
           "id": "openbase-logviewer",
           "title": "OpenBase Log Viewer",
           "icon": "icon-logviewer.svg"
+        },
+        {
+          "id": "openbase-migrationrunner",
+          "title": "OpenBase Migration Runner",
+          "icon": "icon-migrationrunner.svg"
         }
       ]
     },
@@ -89,6 +94,17 @@
           "type": "webview",
           "id": "openbase.logviewer.sidebar",
           "name": "Log Viewer"
+        }
+      ],
+      "openbase-migrationrunner": [
+        {
+          "type": "webview",
+          "id": "openbase.migrationrunner.sidebar",
+          "name": "Migration Runner"
+        },
+        {
+          "id": "openbase.migrationrunner.migrations",
+          "name": "Migrations"
         }
       ]
     },
@@ -291,6 +307,29 @@
         "title": "Import OpenAPI / Swagger",
         "category": "OpenBase",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "openbase.migrationRunner",
+        "title": "OpenBase: Migration Runner",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.migrationRunner.refresh",
+        "title": "Refresh Migrations",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.migrationRunner.migrateUp",
+        "title": "Migrate Up (apply all pending)",
+        "category": "OpenBase",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "openbase.migrationRunner.migrateTo",
+        "title": "Migrate to This Version",
+        "category": "OpenBase",
+        "icon": "$(arrow-right)"
       }
     ],
     "keybindings": [
@@ -388,6 +427,16 @@
           "command": "openbase.httpRunner.requests.importSwagger",
           "when": "view == openbase.httprunner.requests",
           "group": "navigation@4"
+        },
+        {
+          "command": "openbase.migrationRunner.migrateUp",
+          "when": "view == openbase.migrationrunner.migrations",
+          "group": "navigation@1"
+        },
+        {
+          "command": "openbase.migrationRunner.refresh",
+          "when": "view == openbase.migrationrunner.migrations",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -455,6 +504,11 @@
           "command": "openbase.httpRunner.requests.delete",
           "when": "view == openbase.httprunner.requests",
           "group": "2_edit@2"
+        },
+        {
+          "command": "openbase.migrationRunner.migrateTo",
+          "when": "view == openbase.migrationrunner.migrations && (viewItem == migration-applied || viewItem == migration-pending)",
+          "group": "inline"
         }
       ],
       "explorer/context": [
