@@ -1341,6 +1341,55 @@ function getNonce(): string {
 
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
+const HTTP_HISTORY_KEY = 'httpCallHistory';
+const HTTP_HISTORY_LIMIT = 100;
+const HTTP_ENVS_SUBDIR = path.join('.openbase', 'http-runner', 'envs');
+const HTTP_ACTIVE_ENV_KEY = 'httpActiveEnv';
+
+interface HttpEnvFile {
+    name: string;
+    variables: Record<string, string>;
+}
+
+function getEnvsDir(): string | undefined {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return cwd ? path.join(cwd, HTTP_ENVS_SUBDIR) : undefined;
+}
+
+function loadEnvFiles(): Array<{ filename: string; name: string; varCount: number }> {
+    const dir = getEnvsDir();
+    if (!dir || !fs.existsSync(dir)) return [];
+    try {
+        return fs.readdirSync(dir)
+            .filter(f => f.endsWith('.json'))
+            .sort()
+            .map(f => {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as HttpEnvFile;
+                    return { filename: f, name: data.name || f.replace(/\.json$/i, ''), varCount: Object.keys(data.variables ?? {}).length };
+                } catch { return null; }
+            })
+            .filter((x): x is { filename: string; name: string; varCount: number } => x !== null);
+    } catch { return []; }
+}
+
+function resolveEnvVars(text: string, variables: Record<string, string>): string {
+    return text.replace(/\{\{([^}]+)\}\}/g, (_, key: string) => variables[key.trim()] ?? `{{${key.trim()}}}`);
+}
+
+interface HttpHistoryEntry {
+    timestamp: number;
+    method: string;
+    url: string;
+    headers: Array<{name: string; value: string}>;
+    bodyType: string;
+    body: string;
+    authToken: string;
+    statusCode: number;
+    statusText: string;
+    responseBody: string;
+    responseTimeMs: number;
+}
 
 interface HistoryEntry {
     sql: string;
@@ -2048,14 +2097,30 @@ async function httpRunner(): Promise<void> {
     const httpNonce = getNonce();
     httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
 
+    if (cwd) {
+        const envsPattern = new vscode.RelativePattern(cwd, '.openbase/http-runner/envs/*.json');
+        const envsWatcher = vscode.workspace.createFileSystemWatcher(envsPattern);
+        const refreshEnvs = () => {
+            const envs = loadEnvFiles();
+            const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+            httpPanel?.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
+        };
+        envsWatcher.onDidCreate(refreshEnvs);
+        envsWatcher.onDidDelete(refreshEnvs);
+        envsWatcher.onDidChange(refreshEnvs);
+        httpPanel.onDidDispose(() => envsWatcher.dispose());
+    }
+
     httpPanel.webview.onDidReceiveMessage(async (msg: {
         command: string;
         method?: string;
         url?: string;
         headers?: Array<{name: string; value: string}> | Record<string, string>;
+        headersArray?: Array<{name: string; value: string}>;
         bodyType?: string;
         body?: string;
         authToken?: string;
+        filename?: string;
     }) => {
         if (msg.command === 'ready') {
             if (httpPendingRequest) {
@@ -2063,6 +2128,40 @@ async function httpRunner(): Promise<void> {
                 httpPendingRequest = undefined;
                 httpPanel?.webview.postMessage({ command: 'loadRequest', ...pending });
             }
+            const httpHistory = extContext?.globalState.get<HttpHistoryEntry[]>(HTTP_HISTORY_KEY) ?? [];
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: httpHistory });
+            const envs = loadEnvFiles();
+            const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+            httpPanel?.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
+            return;
+        }
+
+        if (msg.command === 'setEnv') {
+            await extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, msg.filename ?? '');
+            return;
+        }
+
+        if (msg.command === 'newEnv') {
+            const dir = getEnvsDir();
+            if (!dir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+            const name = await vscode.window.showInputBox({
+                prompt: 'Environment name',
+                placeHolder: 'Development',
+                validateInput: v => v?.trim() ? undefined : 'Name required',
+            });
+            if (!name?.trim()) return;
+            const filename = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '.json';
+            const filepath = path.join(dir, filename);
+            if (fs.existsSync(filepath)) { vscode.window.showErrorMessage(`Environment "${filename}" already exists.`); return; }
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(filepath, JSON.stringify({ name: name.trim(), variables: { baseUrl: 'http://localhost:5000', token: '' } }, null, 2), 'utf-8');
+            await vscode.window.showTextDocument(vscode.Uri.file(filepath));
+            return;
+        }
+
+        if (msg.command === 'clearHttpHistory') {
+            await extContext?.globalState.update(HTTP_HISTORY_KEY, []);
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: [] });
             return;
         }
 
@@ -2087,9 +2186,46 @@ async function httpRunner(): Promise<void> {
         if (msg.command !== 'send') return;
         const { method = 'GET', url = '', body } = msg;
         const headers = (Array.isArray(msg.headers) ? {} : msg.headers) ?? {};
+
+        const activeEnvFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        let envVars: Record<string, string> = {};
+        if (activeEnvFilename) {
+            const dir = getEnvsDir();
+            if (dir) {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(dir, activeEnvFilename), 'utf-8')) as HttpEnvFile;
+                    envVars = data.variables ?? {};
+                } catch { /* ignore */ }
+            }
+        }
+        const resolvedUrl = resolveEnvVars(url, envVars);
+        const resolvedHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(headers as Record<string, string>)) {
+            resolvedHeaders[resolveEnvVars(k, envVars)] = resolveEnvVars(v, envVars);
+        }
+        const resolvedBody = body ? resolveEnvVars(body, envVars) : body;
+
         try {
-            const result = await doHttpRequest(method, url, headers as Record<string, string>, body);
+            const result = await doHttpRequest(method, resolvedUrl, resolvedHeaders, resolvedBody);
             httpPanel?.webview.postMessage({ command: 'response', ...result });
+
+            const prevHistory = extContext?.globalState.get<HttpHistoryEntry[]>(HTTP_HISTORY_KEY) ?? [];
+            const histEntry: HttpHistoryEntry = {
+                timestamp: Date.now(),
+                method,
+                url,
+                headers: msg.headersArray ?? [],
+                bodyType: msg.bodyType ?? 'none',
+                body: msg.body ?? '',
+                authToken: msg.authToken ?? '',
+                statusCode: result.status,
+                statusText: result.statusText,
+                responseBody: result.body,
+                responseTimeMs: result.time,
+            };
+            const updatedHistory = [histEntry, ...prevHistory].slice(0, HTTP_HISTORY_LIMIT);
+            await extContext?.globalState.update(HTTP_HISTORY_KEY, updatedHistory);
+            httpPanel?.webview.postMessage({ command: 'loadHttpHistory', entries: updatedHistory });
         } catch (e: unknown) {
             httpPanel?.webview.postMessage({ command: 'error', text: e instanceof Error ? e.message : String(e) });
         }
@@ -2213,6 +2349,33 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   .status-badge.s5xx{background:rgba(255,40,40,.15)!important;color:#ff7070!important;border-color:rgba(255,40,40,.3)!important}
   .status-badge.s3xx{background:rgba(255,200,60,.12)!important;color:#ffd060!important;border-color:rgba(255,200,60,.25)!important}
   #copy-btn{background:rgba(180,79,255,.12)!important;color:var(--ob-purple)!important;border:1px solid var(--ob-border)!important}
+  #http-history-panel{flex:1;overflow:auto;display:flex;flex-direction:column;background:var(--ob-bg0)}
+  .http-hist-toolbar{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--ob-dim);border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
+  #http-history-list{flex:1;overflow:auto}
+  .http-hist-item{border-bottom:1px solid rgba(180,79,255,.07)}
+  .http-hist-row{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer}
+  .http-hist-row:hover{background:rgba(180,79,255,.07)}
+  .http-method-badge{font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;flex-shrink:0;font-family:monospace}
+  .mb-GET{background:rgba(80,220,80,.15);color:#6fdc8f;border:1px solid rgba(80,220,80,.2)}
+  .mb-POST{background:rgba(180,140,60,.15);color:#ddb86f;border:1px solid rgba(180,140,60,.25)}
+  .mb-PUT{background:rgba(80,150,200,.15);color:#6fbfdc;border:1px solid rgba(80,150,200,.25)}
+  .mb-PATCH{background:rgba(160,80,200,.15);color:#c06fdc;border:1px solid rgba(160,80,200,.25)}
+  .mb-DELETE{background:rgba(255,63,100,.15);color:#ff7090;border:1px solid rgba(255,63,100,.25)}
+  .mb-OTHER{background:rgba(150,150,150,.12);color:#aaa;border:1px solid rgba(150,150,150,.2)}
+  .http-hist-url{flex:1;font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ob-text)}
+  .http-hist-meta{display:flex;align-items:center;gap:6px;flex-shrink:0}
+  .http-hist-time{font-size:10px;color:var(--ob-dim)}
+  .http-hist-ts{font-size:10px;color:var(--ob-dim)}
+  .http-hist-actions{display:flex;gap:4px;margin-left:2px}
+  .http-hist-actions .btn{font-size:10px!important;padding:1px 6px!important}
+  .http-hist-expand{background:transparent;border:none;cursor:pointer;color:var(--ob-dim);font-size:11px;padding:0 3px}
+  .http-hist-body{padding:8px 12px;border-top:1px solid rgba(180,79,255,.07);background:var(--ob-bg1)}
+  .http-hist-body pre{font-size:11px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .http-hist-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
+  .env-bar{display:flex;align-items:center;gap:8px;padding:3px 12px;border-bottom:1px solid var(--ob-border);flex-shrink:0;background:var(--ob-bg1);font-size:11px}
+  .env-label{color:var(--ob-dim)}
+  #env-select{background:var(--ob-bg2)!important;color:var(--ob-text)!important;border:1px solid var(--ob-border)!important;padding:2px 6px;font-size:11px;border-radius:3px;max-width:160px}
+  .env-var-count{font-size:10px;color:var(--ob-dim)}
 </style>
 </head>
 <body>
@@ -2226,6 +2389,17 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
   <button id="send-btn" class="btn btn-primary">▶ Send</button>
   <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
+  <button id="http-history-btn" class="btn btn-secondary" title="Show request history">History</button>
+</div>
+
+<!-- ENV BAR -->
+<div class="env-bar">
+  <span class="env-label">Env</span>
+  <select id="env-select">
+    <option value="">— none —</option>
+  </select>
+  <span id="env-var-count" class="env-var-count"></span>
+  <button id="new-env-btn" class="btn btn-secondary" style="margin-left:auto;font-size:10px;padding:1px 8px" title="Create new environment file">+ New Env</button>
 </div>
 
 <!-- REQUEST TABS -->
@@ -2277,11 +2451,22 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   <div class="res-body-wrap hidden" id="res-headers-wrap"></div>
 </div>
 
+<div id="http-history-panel" class="hidden">
+  <div class="http-hist-toolbar">
+    <span>Request history</span>
+    <button id="http-clear-hist-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
+  </div>
+  <div id="http-history-list"><p class="http-hist-empty">No history yet.</p></div>
+</div>
+
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   vscode.postMessage({ command: 'ready' });
   let sending = false;
   const BASE_URL = ${safeBase};
+  var httpHistory = [];
+  var httpHistoryVisible = false;
+  var historyExpanded = {};
 
   // init
   if (BASE_URL) document.getElementById('url-input').value = BASE_URL + '/api/';
@@ -2305,6 +2490,48 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
       body: document.getElementById('body-text').value,
       authToken: document.getElementById('auth-token').value.trim()
     });
+  });
+  document.getElementById('env-select').addEventListener('change', function() {
+    vscode.postMessage({ command: 'setEnv', filename: this.value });
+  });
+  document.getElementById('new-env-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'newEnv' });
+  });
+  document.getElementById('http-history-btn').addEventListener('click', function() {
+    toggleHttpHistory();
+  });
+  document.getElementById('http-clear-hist-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'clearHttpHistory' });
+  });
+  document.getElementById('http-history-list').addEventListener('click', function(e) {
+    var loadBtn = e.target.closest('.hist-load-btn');
+    if (loadBtn) {
+      var idx = parseInt(loadBtn.getAttribute('data-idx'), 10);
+      loadHistoryEntry(httpHistory[idx]);
+      if (httpHistoryVisible) toggleHttpHistory();
+      return;
+    }
+    var resendBtn = e.target.closest('.hist-resend-btn');
+    if (resendBtn) {
+      var idx2 = parseInt(resendBtn.getAttribute('data-idx'), 10);
+      loadHistoryEntry(httpHistory[idx2]);
+      if (httpHistoryVisible) toggleHttpHistory();
+      setTimeout(function() { sendRequest(); }, 50);
+      return;
+    }
+    var saveBtn = e.target.closest('.hist-save-btn');
+    if (saveBtn) {
+      var idx3 = parseInt(saveBtn.getAttribute('data-idx'), 10);
+      var entry = httpHistory[idx3];
+      if (entry) vscode.postMessage({ command: 'saveRequest', method: entry.method, url: entry.url, headers: entry.headers, bodyType: entry.bodyType, body: entry.body, authToken: entry.authToken });
+      return;
+    }
+    var row = e.target.closest('.http-hist-row');
+    if (row) {
+      var idx4 = parseInt(row.getAttribute('data-idx'), 10);
+      historyExpanded[idx4] = !historyExpanded[idx4];
+      renderHttpHistory();
+    }
   });
   document.getElementById('url-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendRequest();
@@ -2369,6 +2596,16 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     return h;
   }
 
+  function collectHeadersArray() {
+    var h = [];
+    document.getElementById('headers-list').querySelectorAll('.kv-row').forEach(function(r) {
+      var ins = r.querySelectorAll('input');
+      var k = ins[0].value.trim(), v = ins[1].value.trim();
+      if (k) h.push({ name: k, value: v });
+    });
+    return h;
+  }
+
   // \u2500\u2500 body type \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   function onBodyType() {
     var t = document.getElementById('body-type').value;
@@ -2394,7 +2631,9 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     }
 
     var method = document.getElementById('method').value;
-    var hdrs = collectHeaders();
+    var rawHdrsArr = collectHeadersArray();
+    var hdrs = {};
+    rawHdrsArr.forEach(function(h) { hdrs[h.name] = h.value; });
 
     var token = document.getElementById('auth-token').value.trim();
     if (token) hdrs['Authorization'] = 'Bearer ' + token;
@@ -2424,7 +2663,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     document.getElementById('res-body-wrap').classList.remove('hidden');
     document.getElementById('res-headers-wrap').classList.add('hidden');
 
-    vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, body: body });
+    vscode.postMessage({ command: 'send', method: method, url: url, headers: hdrs, headersArray: rawHdrsArr, bodyType: bodyType, body: body || '', authToken: token });
 
     sendTimeoutId = setTimeout(function() {
       sending = false;
@@ -2437,25 +2676,34 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerSend') { sendRequest(); return; }
-    if (m.command === 'loadRequest') {
-      var sel = document.getElementById('method');
-      sel.value = m.method || 'GET';
-      onMethodChange(sel);
-      document.getElementById('url-input').value = m.url || '';
-      document.getElementById('headers-list').innerHTML = '';
-      (m.headers || []).forEach(function(h) { addHeader(h.name, h.value); });
-      var bt = document.getElementById('body-type');
-      bt.value = m.bodyType || 'none';
-      onBodyType();
-      document.getElementById('body-text').value = m.body || '';
-      document.getElementById('auth-token').value = m.authToken || '';
+    if (m.command === 'loadRequest') { loadHistoryEntry(m); return; }
+    if (m.command === 'loadEnvs') {
+      var sel = document.getElementById('env-select');
+      sel.innerHTML = '\x3coption value="">— none —\x3c/option>';
+      (m.envs || []).forEach(function(env) {
+        var opt = document.createElement('option');
+        opt.value = env.filename;
+        opt.textContent = env.name;
+        if (env.filename === m.activeFilename) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      var active = (m.envs || []).find(function(e) { return e.filename === m.activeFilename; });
+      document.getElementById('env-var-count').textContent = active ? active.varCount + ' var' + (active.varCount !== 1 ? 's' : '') : '';
+      return;
+    }
+    if (m.command === 'loadHttpHistory') {
+      httpHistory = m.entries || [];
+      historyExpanded = {};
+      renderHttpHistory();
       return;
     }
     clearSendTimeout();
     sending = false;
     document.getElementById('send-btn').disabled = false;
-    if (m.command === 'response') showResponse(m);
-    else if (m.command === 'error') showError(m.text);
+    if (m.command === 'response') {
+      if (httpHistoryVisible) toggleHttpHistory();
+      showResponse(m);
+    } else if (m.command === 'error') showError(m.text);
   });
 
   var lastRawBody = '';
@@ -2512,6 +2760,68 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   }
 
   // \u2500\u2500 helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function toggleHttpHistory() {
+    httpHistoryVisible = !httpHistoryVisible;
+    document.getElementById('http-history-panel').classList.toggle('hidden', !httpHistoryVisible);
+    document.querySelector('.req-section').classList.toggle('hidden', httpHistoryVisible);
+    document.querySelector('.res-section').classList.toggle('hidden', httpHistoryVisible);
+    document.getElementById('http-history-btn').textContent = httpHistoryVisible ? '« Back' : 'History';
+  }
+
+  function loadHistoryEntry(entry) {
+    if (!entry) return;
+    var sel = document.getElementById('method');
+    sel.value = entry.method || 'GET';
+    onMethodChange(sel);
+    document.getElementById('url-input').value = entry.url || '';
+    document.getElementById('headers-list').innerHTML = '';
+    (entry.headers || []).forEach(function(h) { addHeader(h.name, h.value); });
+    var bt = document.getElementById('body-type');
+    bt.value = entry.bodyType || 'none';
+    onBodyType();
+    document.getElementById('body-text').value = entry.body || '';
+    document.getElementById('auth-token').value = entry.authToken || '';
+  }
+
+  function renderHttpHistory() {
+    var list = document.getElementById('http-history-list');
+    if (!httpHistory.length) {
+      list.innerHTML = '\x3cp class="http-hist-empty">No history yet.\x3c/p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < httpHistory.length; i++) {
+      var e = httpHistory[i];
+      var m = (e.method || 'GET').toUpperCase();
+      var mCls = ['GET','POST','PUT','PATCH','DELETE'].indexOf(m) !== -1 ? 'mb-' + m : 'mb-OTHER';
+      var sc = e.statusCode || 0;
+      var scCls = sc >= 500 ? 's5xx' : sc >= 400 ? 's4xx' : sc >= 300 ? 's3xx' : 's2xx';
+      var ts = new Date(e.timestamp).toLocaleTimeString();
+      var expanded = !!historyExpanded[i];
+      html += '\x3cdiv class="http-hist-item">'
+            + '\x3cdiv class="http-hist-row" data-idx="' + i + '">'
+            + '\x3cspan class="http-method-badge ' + mCls + '">' + esc(m) + '\x3c/span>'
+            + '\x3cspan class="http-hist-url" title="' + esc(e.url || '') + '">' + esc(e.url || '') + '\x3c/span>'
+            + '\x3cdiv class="http-hist-meta">'
+            + '\x3cspan class="status-badge ' + scCls + '" style="font-size:10px;padding:1px 6px">' + sc + '\x3c/span>'
+            + '\x3cspan class="http-hist-time">' + e.responseTimeMs + ' ms\x3c/span>'
+            + '\x3cspan class="http-hist-ts">' + esc(ts) + '\x3c/span>'
+            + '\x3c/div>'
+            + '\x3cdiv class="http-hist-actions">'
+            + '\x3cbutton class="btn btn-secondary hist-load-btn" data-idx="' + i + '">Load\x3c/button>'
+            + '\x3cbutton class="btn btn-secondary hist-resend-btn" data-idx="' + i + '">Resend\x3c/button>'
+            + '\x3cbutton class="btn btn-secondary hist-save-btn" data-idx="' + i + '">Save\x3c/button>'
+            + '\x3cbutton class="http-hist-expand">' + (expanded ? '▼' : '▶') + '\x3c/button>'
+            + '\x3c/div>'
+            + '\x3c/div>';
+      if (expanded && e.responseBody) {
+        html += '\x3cdiv class="http-hist-body">\x3cpre>' + esc(e.responseBody.slice(0, 3000)) + '\x3c/pre>\x3c/div>';
+      }
+      html += '\x3c/div>';
+    }
+    list.innerHTML = html;
+  }
+
   function flatHeader(hdrs, name) {
     var v = hdrs[name] || hdrs[name.split('-').map(function(p,i){return i===0?p:p[0].toUpperCase()+p.slice(1);}).join('-')];
     return Array.isArray(v) ? v[0] : (v || '');
