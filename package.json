@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.4.1",
+  "version": "10.4.2",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -360,6 +360,18 @@
         "icon": "$(arrow-right)"
       },
       {
+        "command": "openbase.migrationRunner.dryRun",
+        "title": "Dry Run — Preview SQL",
+        "category": "OpenBase",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "openbase.migrationRunner.dryRunTo",
+        "title": "Preview SQL for this Migration",
+        "category": "OpenBase",
+        "icon": "$(eye)"
+      },
+      {
         "command": "openbase.monitor",
         "title": "OpenBase: Monitor",
         "category": "OpenBase"
@@ -491,9 +503,14 @@
           "group": "navigation@1"
         },
         {
-          "command": "openbase.migrationRunner.refresh",
+          "command": "openbase.migrationRunner.dryRun",
           "when": "view == openbase.migrationrunner.migrations",
           "group": "navigation@2"
+        },
+        {
+          "command": "openbase.migrationRunner.refresh",
+          "when": "view == openbase.migrationrunner.migrations",
+          "group": "navigation@3"
         },
         {
           "command": "openbase.dependencyInspector.updateAll",
@@ -578,9 +595,14 @@
           "group": "2_edit@2"
         },
         {
+          "command": "openbase.migrationRunner.dryRunTo",
+          "when": "view == openbase.migrationrunner.migrations && (viewItem == migration-applied || viewItem == migration-pending)",
+          "group": "inline@1"
+        },
+        {
           "command": "openbase.migrationRunner.migrateTo",
           "when": "view == openbase.migrationrunner.migrations && (viewItem == migration-applied || viewItem == migration-pending)",
-          "group": "inline"
+          "group": "inline@2"
         },
         {
           "command": "openbase.dependencyInspector.update",
