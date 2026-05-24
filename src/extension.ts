@@ -4891,6 +4891,224 @@ function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── migration runner ────────────────────────────────────────────────────────
+
+interface MigrationInfo {
+    id: string;
+    applied: boolean;
+}
+
+type MigrationStatus = 'migration-applied' | 'migration-pending' | 'migration-message';
+
+class MigrationItem extends vscode.TreeItem {
+    constructor(
+        public readonly info: MigrationInfo | null,
+        public readonly status: MigrationStatus,
+        label: string,
+    ) {
+        super(label, vscode.TreeItemCollapsibleState.None);
+        this.contextValue = status;
+        if (status === 'migration-applied') {
+            this.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('testing.iconPassed'));
+            this.description = 'applied';
+        } else if (status === 'migration-pending') {
+            this.iconPath = new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('list.warningForeground'));
+            this.description = 'pending';
+        } else {
+            this.iconPath = new vscode.ThemeIcon('info');
+        }
+    }
+}
+
+let migrationProvider: MigrationTreeProvider | undefined;
+
+class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    private items: MigrationItem[] = [];
+    private treeView?: vscode.TreeView<MigrationItem>;
+    private loading = false;
+
+    setTreeView(tv: vscode.TreeView<MigrationItem>): void { this.treeView = tv; }
+
+    getTreeItem(e: MigrationItem): vscode.TreeItem { return e; }
+
+    getChildren(): MigrationItem[] { return this.items; }
+
+    async refresh(): Promise<void> {
+        if (this.loading) return;
+        this.loading = true;
+        if (this.treeView) this.treeView.message = 'Loading migrations…';
+        this._onDidChangeTreeData.fire();
+
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!cwd) {
+            this.items = [new MigrationItem(null, 'migration-message', 'No workspace folder open')];
+            if (this.treeView) { this.treeView.message = undefined; this.treeView.description = undefined; }
+            this.loading = false;
+            this._onDidChangeTreeData.fire();
+            return;
+        }
+
+        try {
+            const migrations = await listMigrations(cwd);
+            if (migrations.length === 0) {
+                this.items = [new MigrationItem(null, 'migration-message', 'No migrations found')];
+                if (this.treeView) this.treeView.description = undefined;
+            } else {
+                this.items = migrations.map(m =>
+                    new MigrationItem(m, m.applied ? 'migration-applied' : 'migration-pending', m.id));
+                const pending = migrations.filter(m => !m.applied).length;
+                if (this.treeView) {
+                    this.treeView.description = pending > 0 ? `${pending} pending` : undefined;
+                }
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.items = [new MigrationItem(null, 'migration-message', `Error: ${msg}`)];
+            if (this.treeView) this.treeView.description = undefined;
+        }
+
+        if (this.treeView) this.treeView.message = undefined;
+        this.loading = false;
+        this._onDidChangeTreeData.fire();
+    }
+}
+
+function findMigrationProject(cwd: string): string | undefined {
+    const found: string[] = [];
+    function scan(dir: string, depth: number): void {
+        if (depth > 4) return;
+        try {
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+                    scan(path.join(dir, e.name), depth + 1);
+                } else if (e.isFile() && e.name.endsWith('.csproj')) {
+                    const content = fs.readFileSync(path.join(dir, e.name), 'utf-8');
+                    if (/Microsoft\.EntityFrameworkCore/i.test(content)) {
+                        found.push(path.join(dir, e.name));
+                    }
+                }
+            }
+        } catch { /* ignore */ }
+    }
+    scan(cwd, 0);
+    return found[0];
+}
+
+function parseMigrationsOutput(output: string): MigrationInfo[] {
+    return output
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !/^(Build|Done|info\s*:|warn\s*:|error\s*:)/i.test(l))
+        .filter(l => /^[\w\d]/.test(l))
+        .map(l => {
+            const pending = /\(Pending\)$/i.test(l);
+            const id = l.replace(/\s*\(Pending\)\s*$/i, '').trim();
+            return { id, applied: !pending };
+        })
+        .filter(m => m.id.length > 0);
+}
+
+async function listMigrations(cwd: string): Promise<MigrationInfo[]> {
+    return new Promise((resolve, reject) => {
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        const project = findMigrationProject(cwd);
+        const projectFlag = project ? ` --project "${project}"` : '';
+        exec(`dotnet ef migrations list${projectFlag}`, { cwd, env, timeout: 60000 }, (err, stdout, stderr) => {
+            if (err) { reject(new Error(stderr.trim() || err.message)); return; }
+            resolve(parseMigrationsOutput(stdout));
+        });
+    });
+}
+
+function runMigrationCommand(cwd: string, efArgs: string[], title: string): void {
+    const channel = vscode.window.createOutputChannel(`OpenBase: ${title}`);
+    channel.show(true);
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const project = findMigrationProject(cwd);
+    const args = [...efArgs];
+    if (project) args.push('--project', `"${project}"`);
+    const child = exec(`dotnet ${args.join(' ')}`, { cwd, env, timeout: 120000 });
+    child.stdout?.on('data', (d: string) => channel.append(d));
+    child.stderr?.on('data', (d: string) => channel.append(d));
+    child.on('close', (code) => {
+        if (code === 0) {
+            channel.appendLine('\nCompleted successfully.');
+            vscode.window.showInformationMessage(`${title} completed.`);
+        } else {
+            channel.appendLine(`\nFailed (exit ${code}).`);
+            vscode.window.showErrorMessage(`${title} failed. Check the output panel.`);
+        }
+        migrationProvider?.refresh();
+    });
+    child.on('error', (err) => {
+        channel.appendLine(err.message);
+        vscode.window.showErrorMessage(err.message);
+        migrationProvider?.refresh();
+    });
+}
+
+function setupMigrationRunner(context: vscode.ExtensionContext): void {
+    migrationProvider = new MigrationTreeProvider();
+
+    const tv = vscode.window.createTreeView('openbase.migrationrunner.migrations', {
+        treeDataProvider: migrationProvider,
+        showCollapseAll: false,
+    });
+    migrationProvider.setTreeView(tv);
+    context.subscriptions.push(tv);
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(() => migrationProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.migrationRunner.refresh',
+            () => migrationProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.migrationRunner.migrateUp', async () => {
+            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!cwd) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+            const confirmed = await vscode.window.showWarningMessage(
+                'Apply all pending migrations?',
+                { modal: true },
+                'Apply'
+            );
+            if (confirmed !== 'Apply') return;
+            runMigrationCommand(cwd, ['ef', 'database', 'update'], 'Migrate Up');
+        }),
+
+        vscode.commands.registerCommand('openbase.migrationRunner.migrateTo',
+            async (item: MigrationItem) => {
+                if (!item.info) return;
+                const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (!cwd) return;
+
+                const isDown = item.status === 'migration-applied';
+                const action = isDown
+                    ? await vscode.window.showWarningMessage(
+                        `Revert to "${item.info.id}"?`,
+                        {
+                            modal: true,
+                            detail: 'Down() migrations will run for every version applied after this point. This may cause irreversible data loss.',
+                        },
+                        'Revert'
+                      )
+                    : await vscode.window.showInformationMessage(
+                        `Apply migrations up to "${item.info.id}"?`,
+                        { modal: true },
+                        'Apply'
+                      );
+
+                if (!action) return;
+                const verb = isDown ? 'Migrate Down to' : 'Migrate Up to';
+                runMigrationCommand(cwd, ['ef', 'database', 'update', item.info.id], `${verb} ${item.info.id}`);
+            }),
+    );
+}
+
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
@@ -4925,6 +5143,7 @@ export function activate(context: vscode.ExtensionContext): void {
     setupSqlTableBrowser(context);
     setupSqlScriptLibrary(context);
     setupHttpRequestLibrary(context);
+    setupMigrationRunner(context);
 
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
@@ -4935,7 +5154,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider('openbase.httprunner.sidebar', new RunnerSidebarProvider('HTTP Runner', 'Open HTTP Runner', httpRunner)),
         vscode.window.registerWebviewViewProvider('openbase.erdiagram.sidebar', new RunnerSidebarProvider('ER Diagram', 'Open ER Diagram', openErDiagram)),
         vscode.window.registerWebviewViewProvider('openbase.logviewer.sidebar', new RunnerSidebarProvider('Log Viewer', 'Open Log Viewer', logViewer)),
+        vscode.window.registerWebviewViewProvider('openbase.migrationrunner.sidebar', new RunnerSidebarProvider('Migration Runner', 'Refresh Migrations', () => migrationProvider?.refresh())),
         vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
+        vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
         reg('openbase.newProject',     newProject),
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
