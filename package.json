@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.6",
+  "version": "10.3.7",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -35,6 +35,11 @@
           "id": "openbase-erdiagram",
           "title": "OpenBase ER Diagram",
           "icon": "icon-erdiagram.svg"
+        },
+        {
+          "id": "openbase-logviewer",
+          "title": "OpenBase Log Viewer",
+          "icon": "icon-logviewer.svg"
         }
       ]
     },
@@ -77,6 +82,13 @@
           "type": "webview",
           "id": "openbase.erdiagram.sidebar",
           "name": "ER Diagram"
+        }
+      ],
+      "openbase-logviewer": [
+        {
+          "type": "webview",
+          "id": "openbase.logviewer.sidebar",
+          "name": "Log Viewer"
         }
       ]
     },
@@ -139,6 +151,11 @@
       {
         "command": "openbase.version",
         "title": "OpenBase: Version",
+        "category": "OpenBase"
+      },
+      {
+        "command": "openbase.logViewer",
+        "title": "OpenBase: Log Viewer",
         "category": "OpenBase"
       },
       {
