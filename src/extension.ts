@@ -1441,7 +1441,7 @@ async function sqlRunner(): Promise<void> {
     const sqlNonce = getNonce();
     sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
 
-    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string }) => {
+    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string; table?: string; keyColumn?: string; keyValue?: string; column?: string; newValue?: string }) => {
         sqlOut().appendLine(`[SQL Runner] Message received: ${msg.command}`);
 
         if (msg.command === 'ready') {
@@ -1496,6 +1496,14 @@ async function sqlRunner(): Promise<void> {
                 fs.writeFileSync(uri.fsPath, msg.csvData, 'utf-8');
                 vscode.window.showInformationMessage(`Saved: ${uri.fsPath}`);
             }
+            return;
+        }
+
+        if (msg.command === 'editCell') {
+            if (!msg.table || !msg.keyColumn || !msg.column) return;
+            const quoteVal = (v: string) => /^-?\d+(\.\d+)?$/.test(v) ? v : `'${v.replace(/'/g, "''")}'`;
+            const updateSql = `UPDATE ${msg.table}\nSET ${msg.column} = ${quoteVal(msg.newValue ?? '')}\nWHERE ${msg.keyColumn} = ${quoteVal(msg.keyValue ?? '')};`;
+            sqlPanel?.webview.postMessage({ command: 'loadScript', content: updateSql, name: 'update' });
             return;
         }
 
@@ -1629,6 +1637,8 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   td{padding:4px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 40%,transparent);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
   tr:hover td{background:var(--vscode-list-hoverBackground)}
   td.null{color:var(--vscode-descriptionForeground);font-style:italic}
+  td.editing{padding:0!important}
+  .cell-edit-input{width:100%;height:100%;background:var(--ob-bg2,#1c1535);color:var(--ob-text,#ede8f8);border:1px solid var(--ob-purple,#b44fff)!important;font-size:12px;font-family:inherit;padding:3px 8px;outline:none}
   :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   .header{background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10))!important;border-bottom:1px solid var(--ob-border)!important}
@@ -1752,6 +1762,46 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
+  });
+  document.getElementById('results').addEventListener('dblclick', function(e) {
+    var td = e.target.closest('td');
+    if (!td) return;
+    var c = parseInt(td.getAttribute('data-c'), 10);
+    if (isNaN(c) || c === 0) return;
+    var r = parseInt(td.getAttribute('data-r'), 10);
+    if (isNaN(r)) return;
+    var sql = editor ? editor.getValue() : '';
+    var tableMatch = sql.match(/\\bFROM\\s+([\\w\\."\`\\[\\]]+)/i);
+    if (!tableMatch) return;
+    var tableName = tableMatch[1].replace(/["\`\\[\\]]/g, '');
+    var keyCol = lastColumns[0];
+    var keyVal = lastRows[r] ? String(lastRows[r][0]) : '';
+    var colName = lastColumns[c];
+    var origVal = td.textContent;
+    td.classList.add('editing');
+    td.innerHTML = '';
+    var inp = document.createElement('input');
+    inp.className = 'cell-edit-input';
+    inp.value = origVal === 'NULL' ? '' : origVal;
+    td.appendChild(inp);
+    inp.focus();
+    inp.select();
+    function commit() {
+      var newVal = inp.value;
+      td.classList.remove('editing');
+      td.textContent = newVal;
+      vscode.postMessage({ command: 'editCell', table: tableName, keyColumn: keyCol, keyValue: keyVal, column: colName, newValue: newVal });
+    }
+    function cancel() {
+      td.classList.remove('editing');
+      td.textContent = origVal;
+    }
+    inp.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      else if (ev.key === 'Tab') { ev.preventDefault(); commit(); }
+    });
+    inp.addEventListener('blur', function() { cancel(); });
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'F8') { e.preventDefault(); run(); }
@@ -1953,7 +2003,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       for (var c = 0; c < columns.length; c++) {
         var val = (rows[r] && rows[r][c] != null) ? rows[r][c] : '';
         var isNull = val === 'NULL';
-        tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '">'
+        tbl += '<td' + (isNull ? ' class="null"' : '') + ' title="' + esc(val) + '" data-r="' + r + '" data-c="' + c + '">'
              + (isNull ? 'NULL' : esc(val)) + '</td>';
       }
       tbl += '</tr>';
