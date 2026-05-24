@@ -5128,6 +5128,76 @@ let monitorTimer: ReturnType<typeof setInterval> | undefined;
 let monPrevCpu: { idle: number; total: number } | undefined;
 let monPrevDisk: { r: number; w: number; ts: number } | undefined;
 let monPrevNet: { rx: number; tx: number; ts: number } | undefined;
+let monCountersProcess: ReturnType<typeof spawn> | undefined;
+let monSelectedPid: number | undefined;
+
+function parseDotnetCounters(line: string): Record<string, number> | null {
+    try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        const events = (obj['Events'] ?? obj['events'] ?? obj['metrics'] ?? []) as Array<Record<string, unknown>>;
+        if (!Array.isArray(events)) return null;
+        const result: Record<string, number> = {};
+        for (const e of events) {
+            const provider = String(e['Provider'] ?? e['provider'] ?? '');
+            if (provider !== 'System.Runtime') continue;
+            const name = String(e['Name'] ?? e['name'] ?? '');
+            const val = Number(e['Mean'] ?? e['mean'] ?? e['value'] ?? 0);
+            if (name && !isNaN(val)) result[name] = val;
+        }
+        return Object.keys(result).length > 0 ? result : null;
+    } catch { return null; }
+}
+
+function stopMonCounters(): void {
+    if (monCountersProcess) { monCountersProcess.kill(); monCountersProcess = undefined; }
+}
+
+function startMonCounters(pid: number): void {
+    stopMonCounters();
+    const extraPath = dotnetToolsPath();
+    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+
+    // Check availability first
+    exec('dotnet-counters --version', { env }, (err) => {
+        if (err) {
+            monitorPanel?.webview.postMessage({
+                command: 'dotnetCountersUnavailable',
+                pid,
+                installCmd: 'dotnet tool install --global dotnet-counters',
+            });
+            return;
+        }
+        const child = spawn('dotnet-counters', [
+            'monitor', '--process-id', String(pid),
+            '--format', 'json',
+            '--counters', 'System.Runtime',
+        ], { env });
+        monCountersProcess = child;
+        let buf = '';
+        child.stdout?.on('data', (data: Buffer) => {
+            buf += data.toString();
+            const lines = buf.split('\n');
+            buf = lines.pop() ?? '';
+            for (const line of lines) {
+                const t = line.trim();
+                if (!t.startsWith('{')) continue;
+                const metrics = parseDotnetCounters(t);
+                if (metrics) monitorPanel?.webview.postMessage({ command: 'dotnetCounters', pid, metrics });
+            }
+        });
+        child.on('exit', () => {
+            monCountersProcess = undefined;
+            if (monSelectedPid === pid) monitorPanel?.webview.postMessage({ command: 'dotnetCountersStopped', pid });
+        });
+        child.on('error', () => {
+            monitorPanel?.webview.postMessage({
+                command: 'dotnetCountersUnavailable',
+                pid,
+                installCmd: 'dotnet tool install --global dotnet-counters',
+            });
+        });
+    });
+}
 
 function monReadCpu(): { idle: number; total: number } | undefined {
     try {
@@ -5257,12 +5327,14 @@ async function monitor(): Promise<void> {
         if (monitorTimer) clearInterval(monitorTimer);
         monitorTimer = undefined;
         monPrevCpu = undefined; monPrevDisk = undefined; monPrevNet = undefined;
+        stopMonCounters();
+        monSelectedPid = undefined;
         monitorPanel = undefined;
     });
     monitorPanel.webview.html = buildMonitorHtml(nonce, monitorPanel.webview.cspSource);
 
     let intervalMs = 2000;
-    monitorPanel.webview.onDidReceiveMessage((msg: { command: string; interval?: number }) => {
+    monitorPanel.webview.onDidReceiveMessage((msg: { command: string; interval?: number; pid?: number }) => {
         if (msg.command === 'setInterval' && msg.interval) {
             intervalMs = msg.interval;
             if (monitorTimer !== undefined) monStartPolling(intervalMs);
@@ -5271,6 +5343,14 @@ async function monitor(): Promise<void> {
             monitorTimer = undefined;
         } else if (msg.command === 'resume') {
             monStartPolling(intervalMs);
+        } else if (msg.command === 'selectProcess') {
+            if (msg.pid === monSelectedPid) {
+                stopMonCounters();
+                monSelectedPid = undefined;
+            } else if (msg.pid !== undefined) {
+                monSelectedPid = msg.pid;
+                startMonCounters(msg.pid);
+            }
         }
     });
 
@@ -5311,11 +5391,21 @@ function buildMonitorHtml(nonce: string, cspSource: string): string {
   .io-vals{display:flex;gap:8px;font-size:11px}
   .io-up::before{content:'↑ ';color:var(--purple)}
   .io-dn::before{content:'↓ ';color:var(--green)}
-  .proc-row{display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:3px;background:var(--bg2);border:1px solid var(--border);border-radius:3px}
+  .proc-row{display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:3px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;cursor:pointer}
+  .proc-row:hover{border-color:var(--purple)}
+  .proc-row.selected{border-color:var(--purple);background:rgba(180,79,255,.08)}
   .proc-name{flex:1;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .proc-pid{font-size:10px;color:var(--dim)}
   .proc-tag{font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(180,79,255,.15);color:var(--purple);white-space:nowrap}
   .empty{font-size:11px;color:var(--dim);font-style:italic}
+  .gc-section{margin-top:10px;padding:10px;background:var(--bg2);border:1px solid var(--border);border-radius:4px}
+  .gc-hdr{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:8px}
+  .gc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px}
+  .gc-card{background:var(--bg1);border:1px solid var(--border);border-radius:3px;padding:6px 8px}
+  .gc-name{font-size:10px;color:var(--dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gc-val{font-size:13px;font-weight:600;color:var(--text)}
+  .gc-unavail{font-size:11px;color:var(--dim);font-style:italic}
+  .gc-unavail code{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;color:var(--purple)}
 </style>
 </head>
 <body>
@@ -5354,13 +5444,15 @@ function buildMonitorHtml(nonce: string, cspSource: string): string {
     </div>
   </div>
   <div class="section">
-    <div class="section-hdr">.NET Processes</div>
+    <div class="section-hdr">.NET Processes <span style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">(click to monitor GC)</span></div>
     <div id="dotnet-list"><span class="empty">No .NET processes detected</span></div>
+    <div id="gc-section" style="display:none"></div>
   </div>
 </div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   var paused = false;
+  var selectedPid = null;
 
   function toggle() {
     paused = !paused;
@@ -5387,9 +5479,73 @@ function buildMonitorHtml(nonce: string, cspSource: string): string {
   function esc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/>/g,'&gt;');
   }
+  function fmtGcVal(name, v) {
+    var n = name.toLowerCase();
+    if (n.indexOf('memory') !== -1 || n.indexOf('bytes') !== -1) {
+      var mb = v / 1048576;
+      return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+    }
+    if (n.indexOf('ratio') !== -1 || n.indexOf('percent') !== -1) return v.toFixed(1) + '%';
+    if (n.indexOf('time') !== -1 && v > 1000) return (v / 1000).toFixed(2) + ' s';
+    if (Number.isInteger(v) || v > 100) return v.toFixed(0);
+    return v.toFixed(2);
+  }
+
+  document.getElementById('dotnet-list').addEventListener('click', function(e) {
+    var row = e.target.closest('.proc-row');
+    if (!row) return;
+    var pid = parseInt(row.dataset.pid, 10);
+    vscode.postMessage({ command: 'selectProcess', pid: pid });
+    if (selectedPid === pid) {
+      selectedPid = null;
+      row.classList.remove('selected');
+      document.getElementById('gc-section').style.display = 'none';
+    } else {
+      selectedPid = pid;
+      document.querySelectorAll('.proc-row').forEach(function(r) { r.classList.remove('selected'); });
+      row.classList.add('selected');
+      var gcSec = document.getElementById('gc-section');
+      gcSec.style.display = 'block';
+      gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics</div><span class="gc-unavail">Connecting…</span></div>';
+    }
+  });
+
+  function renderGcMetrics(metrics) {
+    var gcSec = document.getElementById('gc-section');
+    gcSec.style.display = 'block';
+    var keys = Object.keys(metrics).sort();
+    var cards = keys.map(function(k) {
+      return '<div class="gc-card"><div class="gc-name">' + esc(k) + '</div>' +
+        '<div class="gc-val">' + esc(fmtGcVal(k, metrics[k])) + '</div></div>';
+    }).join('');
+    gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics (PID ' + selectedPid + ')</div><div class="gc-grid">' + cards + '</div></div>';
+  }
 
   window.addEventListener('message', function(e) {
     var m = e.data;
+    if (m.command === 'dotnetCounters') {
+      if (m.pid === selectedPid) renderGcMetrics(m.metrics);
+      return;
+    }
+    if (m.command === 'dotnetCountersUnavailable') {
+      if (m.pid === selectedPid) {
+        var gcSec = document.getElementById('gc-section');
+        gcSec.style.display = 'block';
+        gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics</div>' +
+          '<span class="gc-unavail">dotnet-counters not found. Install: <code>' + esc(m.installCmd) + '</code></span></div>';
+      }
+      return;
+    }
+    if (m.command === 'dotnetCountersStopped') {
+      if (m.pid === selectedPid) {
+        var gcSec2 = document.getElementById('gc-section');
+        if (gcSec2.style.display !== 'none') {
+          gcSec2.innerHTML += '<span class="gc-unavail" style="display:block;margin-top:6px">Process exited</span>';
+        }
+        selectedPid = null;
+      }
+      return;
+    }
     if (m.command !== 'metrics') return;
     var o = m.os;
 
@@ -5413,7 +5569,8 @@ function buildMonitorHtml(nonce: string, cspSource: string): string {
       return;
     }
     el.innerHTML = procs.map(function(p) {
-      return '<div class="proc-row">' +
+      var sel = p.pid === selectedPid ? ' selected' : '';
+      return '<div class="proc-row' + sel + '" data-pid="' + p.pid + '">' +
         '<span class="proc-name">' + esc(p.name) + '</span>' +
         '<span class="proc-pid">PID ' + p.pid + '</span>' +
         '<span class="proc-tag">' + p.memMB + ' MB</span>' +
