@@ -2660,6 +2660,13 @@ interface TableConstraint {
     refColumn: string;
 }
 
+interface ErTableData {
+    schema: string;
+    name: string;
+    columns: { name: string; type: string; pk: boolean; fk: boolean }[];
+    fks: { toSchema: string; toTable: string }[];
+}
+
 async function loadTableDetails(
     conn: DbConnection,
     schema: string,
@@ -2949,6 +2956,321 @@ body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:
 </html>`;
 }
 
+// ─── ER Diagram ───────────────────────────────────────────────────────────────
+
+function buildErDiagramLoadingHtml(nonce: string, cspSource: string): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
+.spinner{width:32px;height:32px;border:3px solid rgba(180,79,255,.2);border-top-color:#b44fff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.lbl{color:#666;font-size:12px}
+</style>
+</head>
+<body>
+<div class="spinner"></div>
+<div class="lbl">Loading ER Diagram&hellip;</div>
+</body>
+</html>`;
+}
+
+function buildErDiagramHtml(nonce: string, cspSource: string, tables: ErTableData[]): string {
+    const schemas = [...new Set(tables.map(t => t.schema))].sort();
+    const schemaOpts = schemas.map(s => `<option value="${s.replace(/"/g, '&quot;')}">${s.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;')}</option>`).join('');
+    const dataJson = JSON.stringify(tables).replace(/\x3c/g, '\\u003c');
+
+    return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; img-src data: blob:;">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;font-size:13px}
+.toolbar{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #1e2035;flex-shrink:0;background:#111328}
+.toolbar label{color:#888;font-size:11px}
+select{background:#1a1c2e;color:#e8e8f0;border:1px solid #2a2d45;border-radius:4px;padding:3px 6px;font-size:12px;font-family:inherit;cursor:pointer}
+.btn{padding:3px 10px;border:1px solid #2a2d45;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;background:#1a1c2e;color:#e8e8f0}
+.btn:hover{background:#23263d;border-color:#b44fff}
+.sep{width:1px;height:18px;background:#1e2035;margin:0 2px}
+.wrap{flex:1;overflow:hidden;position:relative;cursor:grab}
+.wrap.dragging{cursor:grabbing}
+#diagram{position:absolute;top:0;left:0;transform-origin:0 0;padding:20px}
+#diagram svg{display:block}
+.hint{color:#444;font-size:11px;margin-left:auto}
+.count{color:#666;font-size:11px}
+</style>
+</head>
+<body style="display:flex;flex-direction:column">
+<div class="toolbar">
+  <label>Schema</label>
+  <select id="schema-sel">
+    ${schemas.length > 1 ? '<option value="__all__">All schemas</option>' : ''}
+    ${schemaOpts}
+  </select>
+  <div class="sep"></div>
+  <button class="btn" id="btn-zi">+</button>
+  <button class="btn" id="btn-zo">&minus;</button>
+  <button class="btn" id="btn-zr">Reset</button>
+  <div class="sep"></div>
+  <button class="btn" id="btn-ex">Export SVG</button>
+  <span class="count" id="count"></span>
+  <span class="hint">Scroll to zoom &middot; Drag to pan &middot; Click table to inspect</span>
+</div>
+<div class="wrap" id="wrap">
+  <div id="diagram"></div>
+</div>
+<script type="application/json" id="er-data">${dataJson}</script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" nonce="${nonce}"></script>
+<script nonce="${nonce}">
+(function() {
+  var vscode = acquireVsCodeApi();
+  var DATA = JSON.parse(document.getElementById('er-data').textContent || '[]');
+  var scale = 1, panX = 20, panY = 20;
+  var dragging = false, dx = 0, dy = 0, spx = 0, spy = 0;
+  var diagramEl = document.getElementById('diagram');
+  var wrap = document.getElementById('wrap');
+  var currentTables = [];
+
+  mermaid.initialize({ startOnLoad: false, theme: 'dark', maxTextSize: 200000, er: { diagramPadding: 24, entityPadding: 12, useMaxWidth: false } });
+
+  function sanitize(s) { return String(s || '').replace(/[^a-zA-Z0-9]/g, '_') || '_'; }
+  function eid(schema, table) { return sanitize(schema) + '_' + sanitize(table); }
+
+  function buildDiagram(tables) {
+    var lines = ['erDiagram'];
+    var ids = {};
+    for (var i = 0; i < tables.length; i++) { ids[eid(tables[i].schema, tables[i].name)] = true; }
+
+    for (var i = 0; i < tables.length; i++) {
+      var t = tables[i];
+      var id = eid(t.schema, t.name);
+      var seen = {};
+      lines.push('  ' + id + ' {');
+      if (t.columns.length > 0) {
+        for (var j = 0; j < t.columns.length; j++) {
+          var col = t.columns[j];
+          var ctype = (col.type.split('(')[0] || 'text').replace(/[^a-zA-Z0-9_]/g, '_') || 'text';
+          var cname = sanitize(col.name);
+          if (/^[0-9]/.test(ctype)) { ctype = 't' + ctype; }
+          if (/^[0-9]/.test(cname)) { cname = 'c' + cname; }
+          var ukey = ctype + '_' + cname;
+          if (seen[ukey]) { continue; }
+          seen[ukey] = true;
+          var attrs = col.pk ? ' PK' : (col.fk ? ' FK' : '');
+          lines.push('    ' + ctype + ' ' + cname + attrs);
+        }
+      } else {
+        lines.push('    string _');
+      }
+      lines.push('  }');
+    }
+
+    var relSeen = {};
+    for (var i = 0; i < tables.length; i++) {
+      var t = tables[i];
+      var fromId = eid(t.schema, t.name);
+      for (var j = 0; j < t.fks.length; j++) {
+        var fk = t.fks[j];
+        var toSchema = fk.toSchema || t.schema;
+        var toId = eid(toSchema, fk.toTable);
+        if (!ids[toId] || toId === fromId) { continue; }
+        var rkey = toId + '|' + fromId;
+        if (relSeen[rkey]) { continue; }
+        relSeen[rkey] = true;
+        lines.push('  ' + toId + ' ||--o{ ' + fromId + ' : "has"');
+      }
+    }
+    return lines.join('\\n');
+  }
+
+  function applyT() {
+    diagramEl.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + scale + ')';
+  }
+
+  function addClicks(tables) {
+    var map = {};
+    for (var i = 0; i < tables.length; i++) {
+      map[eid(tables[i].schema, tables[i].name)] = { schema: tables[i].schema, table: tables[i].name };
+    }
+    var svg = diagramEl.querySelector('svg');
+    if (!svg) { return; }
+    var texts = svg.querySelectorAll('text');
+    for (var i = 0; i < texts.length; i++) {
+      var txt = texts[i];
+      var content = (txt.textContent || '').trim();
+      if (!map[content]) { continue; }
+      (function(info) {
+        var g = txt.parentNode;
+        while (g && g.tagName !== 'g' && g !== svg) { g = g.parentNode; }
+        if (!g || g === svg) { return; }
+        g.style.cursor = 'pointer';
+        g.addEventListener('click', function(e) {
+          e.stopPropagation();
+          vscode.postMessage({ command: 'inspect', schema: info.schema, table: info.table });
+        });
+      })(map[content]);
+    }
+  }
+
+  async function render(tables) {
+    currentTables = tables;
+    document.getElementById('count').textContent = tables.length + ' table' + (tables.length !== 1 ? 's' : '');
+    if (tables.length === 0) {
+      diagramEl.innerHTML = '\x3cp style="color:#555;padding:40px">No tables to display.\x3c/p>';
+      return;
+    }
+    diagramEl.innerHTML = '';
+    try {
+      var str = buildDiagram(tables);
+      var result = await mermaid.render('er-graph-' + Date.now(), str);
+      diagramEl.innerHTML = result.svg;
+      addClicks(tables);
+    } catch(e) {
+      diagramEl.innerHTML = '\x3cp style="color:#c72e0f;padding:40px">Render error: ' + String(e) + '\x3c/p>';
+    }
+  }
+
+  function filterAndRender() {
+    var sel = document.getElementById('schema-sel').value;
+    var filtered = sel === '__all__' ? DATA : DATA.filter(function(t) { return t.schema === sel; });
+    panX = 20; panY = 20; scale = 1; applyT();
+    render(filtered);
+  }
+
+  document.getElementById('schema-sel').addEventListener('change', filterAndRender);
+  document.getElementById('btn-zi').addEventListener('click', function() { scale = Math.min(4, scale * 1.2); applyT(); });
+  document.getElementById('btn-zo').addEventListener('click', function() { scale = Math.max(0.1, scale / 1.2); applyT(); });
+  document.getElementById('btn-zr').addEventListener('click', function() { scale = 1; panX = 20; panY = 20; applyT(); });
+  document.getElementById('btn-ex').addEventListener('click', function() {
+    var svg = diagramEl.querySelector('svg');
+    if (!svg) { return; }
+    vscode.postMessage({ command: 'exportSvg', svg: svg.outerHTML });
+  });
+
+  wrap.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var rect = wrap.getBoundingClientRect();
+    var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    var delta = e.deltaY > 0 ? 0.9 : 1.1;
+    var ns = Math.min(4, Math.max(0.1, scale * delta));
+    panX = mx - (mx - panX) * (ns / scale);
+    panY = my - (my - panY) * (ns / scale);
+    scale = ns;
+    applyT();
+  }, { passive: false });
+
+  wrap.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) { return; }
+    dragging = true; dx = e.clientX; dy = e.clientY; spx = panX; spy = panY;
+    wrap.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', function(e) {
+    if (!dragging) { return; }
+    panX = spx + (e.clientX - dx); panY = spy + (e.clientY - dy); applyT();
+  });
+  window.addEventListener('mouseup', function() { dragging = false; wrap.classList.remove('dragging'); });
+
+  window.addEventListener('message', function(ev) {
+    var msg = ev.data;
+    if (msg && msg.command === 'refresh') { filterAndRender(); }
+  });
+
+  filterAndRender();
+})();
+</script>
+</body>
+</html>`;
+}
+
+let erDiagramPanel: vscode.WebviewPanel | undefined;
+
+async function openErDiagram(): Promise<void> {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const conn = cwd ? findConnection(cwd) : undefined;
+    if (!conn) {
+        vscode.window.showErrorMessage('No database connection found in workspace.');
+        return;
+    }
+
+    if (erDiagramPanel) {
+        erDiagramPanel.reveal(vscode.ViewColumn.One);
+        return;
+    }
+
+    const nonce = getNonce();
+    erDiagramPanel = vscode.window.createWebviewPanel(
+        'openbase.erDiagram', 'ER Diagram',
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    erDiagramPanel.onDidDispose(() => { erDiagramPanel = undefined; });
+    erDiagramPanel.webview.html = buildErDiagramLoadingHtml(nonce, erDiagramPanel.webview.cspSource);
+
+    erDiagramPanel.webview.onDidReceiveMessage(async (msg: { command: string; schema?: string; table?: string; svg?: string }) => {
+        if (msg.command === 'inspect' && msg.schema && msg.table) {
+            await openTableInspector(conn, msg.schema, msg.table, conn.type as DbTemplate);
+        } else if (msg.command === 'exportSvg' && msg.svg) {
+            const uri = await vscode.window.showSaveDialog({ filters: { 'SVG Image': ['svg'] }, defaultUri: vscode.Uri.file('er-diagram.svg') });
+            if (uri) {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(msg.svg, 'utf-8'));
+                vscode.window.showInformationMessage(`ER Diagram exported to ${uri.fsPath}`);
+            }
+        }
+    });
+
+    try {
+        const schemas = await loadSqlTables(conn);
+        const allTables: { schema: string; table: string }[] = [];
+        for (const [schema, { tables }] of schemas) {
+            for (const table of tables) {
+                allTables.push({ schema, table });
+            }
+        }
+
+        const BATCH = 8;
+        const erTables: ErTableData[] = [];
+        for (let i = 0; i < allTables.length; i += BATCH) {
+            const batch = allTables.slice(i, i + BATCH);
+            const results = await Promise.all(batch.map(async ({ schema, table }) => {
+                try {
+                    const details = await loadTableDetails(conn, schema, table);
+                    const pkCols = new Set(details.constraints.filter(c => c.type === 'PRIMARY KEY').map(c => c.column));
+                    const fkCols = new Set(details.constraints.filter(c => c.type === 'FOREIGN KEY').map(c => c.column));
+                    return {
+                        schema,
+                        name: table,
+                        columns: details.columns.map(col => ({
+                            name: col.name,
+                            type: col.type,
+                            pk: pkCols.has(col.name),
+                            fk: fkCols.has(col.name),
+                        })),
+                        fks: details.constraints
+                            .filter(c => c.type === 'FOREIGN KEY' && c.refTable)
+                            .map(c => ({ toSchema: c.refSchema, toTable: c.refTable })),
+                    };
+                } catch {
+                    return { schema, name: table, columns: [], fks: [] };
+                }
+            }));
+            erTables.push(...results);
+        }
+
+        if (erDiagramPanel) {
+            erDiagramPanel.webview.html = buildErDiagramHtml(nonce, erDiagramPanel.webview.cspSource, erTables);
+        }
+    } catch (e) {
+        vscode.window.showErrorMessage(`ER Diagram failed: ${e instanceof Error ? e.message : String(e)}`);
+        erDiagramPanel?.dispose();
+    }
+}
+
 const tableInspectorPanels = new Map<string, vscode.WebviewPanel>();
 
 async function openTableInspector(
@@ -3036,6 +3358,8 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
                 }
                 await openTableInspector(conn, item.schema, item.label as string, item.dbType);
             }),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.erDiagram', () => openErDiagram()),
     );
 
     sqlTableProvider.refresh();
@@ -3397,6 +3721,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider(OpenBasePanelProvider.viewType, panelProvider),
         vscode.window.registerWebviewViewProvider('openbase.sqlrunner.sidebar', new RunnerSidebarProvider('SQL Runner', 'Open SQL Runner', sqlRunner)),
         vscode.window.registerWebviewViewProvider('openbase.httprunner.sidebar', new RunnerSidebarProvider('HTTP Runner', 'Open HTTP Runner', httpRunner)),
+        vscode.window.registerWebviewViewProvider('openbase.erdiagram.sidebar', new RunnerSidebarProvider('ER Diagram', 'Open ER Diagram', openErDiagram)),
         reg('openbase.newProject',     newProject),
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),

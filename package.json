@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.3",
+  "version": "10.3.4",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -30,6 +30,11 @@
           "id": "openbase-httprunner",
           "title": "OpenBase HTTP Runner",
           "icon": "icon-httprunner.svg"
+        },
+        {
+          "id": "openbase-erdiagram",
+          "title": "OpenBase ER Diagram",
+          "icon": "icon-erdiagram.svg"
         }
       ]
     },
@@ -65,6 +70,13 @@
         {
           "id": "openbase.httprunner.requests",
           "name": "Requests"
+        }
+      ],
+      "openbase-erdiagram": [
+        {
+          "type": "webview",
+          "id": "openbase.erdiagram.sidebar",
+          "name": "ER Diagram"
         }
       ]
     },
@@ -150,6 +162,12 @@
         "command": "openbase.httpRunner.send",
         "title": "OpenBase: Send HTTP Request",
         "category": "OpenBase"
+      },
+      {
+        "command": "openbase.sqlRunner.erDiagram",
+        "title": "ER Diagram",
+        "category": "OpenBase",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "openbase.sqlRunner.tables.refresh",
@@ -275,6 +293,16 @@
           "command": "openbase.specialist",
           "when": "view == openbase.panel",
           "group": "1_openbase"
+        },
+        {
+          "command": "openbase.sqlRunner.erDiagram",
+          "when": "view == openbase.sqlrunner.tables",
+          "group": "navigation"
+        },
+        {
+          "command": "openbase.sqlRunner.erDiagram",
+          "when": "view == openbase.erdiagram.sidebar",
+          "group": "navigation"
         },
         {
           "command": "openbase.sqlRunner.tables.refresh",
