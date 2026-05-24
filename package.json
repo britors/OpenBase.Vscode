@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.4",
+  "version": "10.3.5",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -170,6 +170,18 @@
         "icon": "$(type-hierarchy)"
       },
       {
+        "command": "openbase.sqlRunner.tables.filter",
+        "title": "Filter Tables",
+        "category": "OpenBase",
+        "icon": "$(search)"
+      },
+      {
+        "command": "openbase.sqlRunner.tables.clearFilter",
+        "title": "Clear Filter",
+        "category": "OpenBase",
+        "icon": "$(search-stop)"
+      },
+      {
         "command": "openbase.sqlRunner.tables.refresh",
         "title": "Refresh Tables",
         "category": "OpenBase",
@@ -302,6 +314,16 @@
         {
           "command": "openbase.sqlRunner.erDiagram",
           "when": "view == openbase.erdiagram.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "openbase.sqlRunner.tables.filter",
+          "when": "view == openbase.sqlrunner.tables",
+          "group": "navigation"
+        },
+        {
+          "command": "openbase.sqlRunner.tables.clearFilter",
+          "when": "view == openbase.sqlrunner.tables",
           "group": "navigation"
         },
         {

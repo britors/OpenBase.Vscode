@@ -80,6 +80,7 @@ async function guardInstalled(): Promise<boolean> {
 }
 
 let panelProvider: OpenBasePanelProvider | undefined;
+let extContext: vscode.ExtensionContext | undefined;
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
@@ -1338,6 +1339,16 @@ function getNonce(): string {
     return text;
 }
 
+const SQL_HISTORY_KEY = 'sqlQueryHistory';
+const SQL_HISTORY_LIMIT = 50;
+
+interface HistoryEntry {
+    sql: string;
+    timestamp: number;
+    connectionLabel: string;
+    rowCount: number;
+}
+
 let sqlPanel: vscode.WebviewPanel | undefined;
 let sqlProcess: import('child_process').ChildProcess | undefined;
 let sqlLog: vscode.OutputChannel | undefined;
@@ -1376,6 +1387,8 @@ async function sqlRunner(): Promise<void> {
                 sqlPendingScript = undefined;
                 sqlPanel?.webview.postMessage({ command: 'loadScript', content: pending.content, name: pending.name });
             }
+            const historyEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
             return;
         }
 
@@ -1394,6 +1407,12 @@ async function sqlRunner(): Promise<void> {
             fs.writeFileSync(path.join(scriptsDir, safeName), msg.sql, 'utf-8');
             vscode.window.showInformationMessage(`Script saved: ${safeName}`);
             sqlScriptProvider?.refresh();
+            return;
+        }
+
+        if (msg.command === 'clearHistory') {
+            await extContext?.globalState.update(SQL_HISTORY_KEY, []);
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: [] });
             return;
         }
 
@@ -1486,6 +1505,12 @@ async function sqlRunner(): Promise<void> {
             const result = parseSqlOutput(output, activeConn.type);
             sqlOut().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
             sqlPanel?.webview.postMessage({ command: 'result', ...result });
+
+            const prevEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
+            const newEntry: HistoryEntry = { sql, timestamp: Date.now(), connectionLabel: activeConn.label, rowCount: result.rows.length };
+            const updatedEntries = [newEntry, ...prevEntries].slice(0, SQL_HISTORY_LIMIT);
+            await extContext?.globalState.update(SQL_HISTORY_KEY, updatedEntries);
+            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
             sqlOut().appendLine(`[SQL Runner] Error: ${text}`);
@@ -1568,6 +1593,16 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .msg-box{background:rgba(180,79,255,.10)!important;border-color:var(--ob-border)!important;color:var(--ob-purple)!important}
   .spinner{border-color:var(--ob-purple)!important;border-top-color:transparent!important}
   .editor-loading{color:var(--ob-dim)!important}
+  #history-panel{flex:1;overflow:auto;display:flex;flex-direction:column;background:var(--ob-bg0)}
+  .history-toolbar{display:flex;align-items:center;justify-content:space-between;padding:4px 12px;font-size:11px;color:var(--ob-dim);border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
+  #history-list{flex:1;overflow:auto}
+  .history-item{padding:8px 12px;border-bottom:1px solid rgba(180,79,255,.07);cursor:pointer;display:flex;flex-direction:column;gap:4px}
+  .history-item:hover{background:rgba(180,79,255,.07)}
+  .history-preview{font-family:monospace;font-size:11px;color:var(--ob-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-meta{font-size:10px;color:var(--ob-dim);display:flex;gap:8px;align-items:center}
+  .history-pin{margin-left:auto;font-size:10px!important;padding:1px 6px!important;opacity:0;transition:opacity .15s}
+  .history-item:hover .history-pin{opacity:1}
+  .history-empty{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
 </style>
 </head>
 <body>
@@ -1583,11 +1618,19 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <button id="run-btn" class="btn btn-primary">&#x25B6; Run</button>
   <button id="cancel-btn" class="btn btn-cancel hidden">&#x2715; Cancel</button>
   <button id="save-btn" class="btn btn-secondary" title="Save script to library">Save&hellip;</button>
+  <button id="history-btn" class="btn btn-secondary" title="Show query history">History</button>
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
 <div id="results" class="results">
   <p class="placeholder">Write a query above and press Run or F8</p>
+</div>
+<div id="history-panel" class="hidden">
+  <div class="history-toolbar">
+    <span>Query history</span>
+    <button id="clear-history-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
+  </div>
+  <div id="history-list"><p class="history-empty">No history yet.</p></div>
 </div>
 <script src="${monacoBase}/loader.js"></script>
 <script nonce="${nonce}">
@@ -1603,6 +1646,8 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   var runTimeoutId = null;
   var editor = null;
   var pendingLoad = null;
+  var historyEntries = [];
+  var historyVisible = false;
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -1612,6 +1657,35 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   document.getElementById('save-btn').addEventListener('click', function() {
     var sql = editor ? editor.getValue() : '';
     if (sql.trim()) vscode.postMessage({ command: 'saveScript', sql: sql });
+  });
+  document.getElementById('history-btn').addEventListener('click', function() {
+    toggleHistory();
+  });
+  document.getElementById('clear-history-btn').addEventListener('click', function() {
+    vscode.postMessage({ command: 'clearHistory' });
+  });
+  document.getElementById('history-list').addEventListener('click', function(e) {
+    var pin = e.target.closest('.history-pin');
+    if (pin) {
+      var idx = parseInt(pin.getAttribute('data-idx'), 10);
+      var entry = historyEntries[idx];
+      if (entry) vscode.postMessage({ command: 'saveScript', sql: entry.sql });
+      return;
+    }
+    var item = e.target.closest('.history-item');
+    if (item) {
+      var idx2 = parseInt(item.getAttribute('data-idx'), 10);
+      var entry2 = historyEntries[idx2];
+      if (entry2) {
+        if (editor) {
+          editor.setValue(entry2.sql);
+          editor.setPosition({ lineNumber: 1, column: 1 });
+        } else {
+          pendingLoad = entry2.sql;
+        }
+        if (historyVisible) toggleHistory();
+      }
+    }
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
@@ -1741,6 +1815,11 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerRun') { run(); return; }
+    if (m.command === 'loadHistory') {
+      historyEntries = m.entries || [];
+      renderHistory();
+      return;
+    }
     if (m.command === 'loadScript') {
       if (editor) {
         editor.setValue(m.content || '');
@@ -1767,6 +1846,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       running = false;
       document.getElementById('run-btn').classList.remove('hidden');
       document.getElementById('cancel-btn').classList.add('hidden');
+      if (historyVisible) toggleHistory();
       var elapsed = ((Date.now() - t0) / 1000).toFixed(2) + 's';
       renderResult(m.columns, m.rows, m.message, elapsed);
     } else if (m.command === 'error') {
@@ -1822,6 +1902,38 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
     var res = document.getElementById('results');
     res.innerHTML = '';
     res.appendChild(wrap);
+  }
+
+  function toggleHistory() {
+    historyVisible = !historyVisible;
+    document.getElementById('history-panel').classList.toggle('hidden', !historyVisible);
+    document.getElementById('results').classList.toggle('hidden', historyVisible);
+    document.getElementById('history-btn').textContent = historyVisible ? '« Results' : 'History';
+  }
+
+  function renderHistory() {
+    var list = document.getElementById('history-list');
+    if (!historyEntries.length) {
+      list.innerHTML = '\x3cp class="history-empty">No history yet.\x3c/p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < historyEntries.length; i++) {
+      var e = historyEntries[i];
+      var preview = e.sql.replace(/\\s+/g, ' ').slice(0, 80);
+      var ts = new Date(e.timestamp).toLocaleString();
+      var rows = e.rowCount + ' row' + (e.rowCount !== 1 ? 's' : '');
+      html += '\x3cdiv class="history-item" data-idx="' + i + '">'
+            + '\x3cdiv class="history-preview">' + esc(preview) + '\x3c/div>'
+            + '\x3cdiv class="history-meta">'
+            + '\x3cspan>' + esc(ts) + '\x3c/span>'
+            + '\x3cspan>' + esc(e.connectionLabel) + '\x3c/span>'
+            + '\x3cspan>' + rows + '\x3c/span>'
+            + '\x3cbutton class="btn btn-secondary history-pin" data-idx="' + i + '" title="Save to script library">Pin\x3c/button>'
+            + '\x3c/div>'
+            + '\x3c/div>';
+    }
+    list.innerHTML = html;
   }
 
   function setStatus(html) { document.getElementById('status').innerHTML = html; }
@@ -2507,8 +2619,22 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     private state: 'idle' | 'loading' | 'error' | 'noconn' = 'idle';
     private errorMsg = '';
     private treeView?: vscode.TreeView<SqlTableItem>;
+    filterText = '';
 
     setTreeView(tv: vscode.TreeView<SqlTableItem>): void { this.treeView = tv; }
+
+    setFilter(text: string): void {
+        this.filterText = text.toLowerCase().trim();
+        const total = Array.from(this.schemas.values()).reduce((s, v) => s + v.tables.length, 0);
+        if (this.filterText) {
+            const matches = Array.from(this.schemas.values())
+                .reduce((s, v) => s + v.tables.filter(t => t.toLowerCase().includes(this.filterText)).length, 0);
+            if (this.treeView) this.treeView.description = `${matches}/${total} tables`;
+        } else {
+            if (this.treeView) this.treeView.description = undefined;
+        }
+        this._onDidChangeTreeData.fire();
+    }
 
     async refresh(): Promise<void> {
         this.schemas.clear();
@@ -2549,11 +2675,14 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
 
         if (!element) {
             if (this.schemas.size === 0) return [];
+            const filter = this.filterText;
             return Array.from(this.schemas.entries())
                 .sort(([a], [b]) => a.localeCompare(b))
+                .filter(([, { tables }]) => !filter || tables.some(t => t.toLowerCase().includes(filter)))
                 .map(([schema, { tables }]) => {
-                    const item = new SqlTableItem('schema', `${schema}  (${tables.length})`);
-                    (item as SqlTableItem & { _schema: string })._schema = schema;
+                    const count = filter ? tables.filter(t => t.toLowerCase().includes(filter)).length : tables.length;
+                    const item = new SqlTableItem('schema', `${schema}  (${count})`);
+                    if (filter) item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
                     return item;
                 });
         }
@@ -2562,7 +2691,9 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
             const schemaName = (element.label as string).replace(/\s+\(\d+\)$/, '');
             const entry = this.schemas.get(schemaName);
             if (!entry) return [];
-            return entry.tables.map(t => new SqlTableItem('table', t, schemaName, entry.dbType));
+            const filter = this.filterText;
+            const tables = filter ? entry.tables.filter(t => t.toLowerCase().includes(filter)) : entry.tables;
+            return tables.map(t => new SqlTableItem('table', t, schemaName, entry.dbType));
         }
         return [];
     }
@@ -3360,6 +3491,20 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
             }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.erDiagram', () => openErDiagram()),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.filter', () => {
+            const inputBox = vscode.window.createInputBox();
+            inputBox.placeholder = 'Filter tables...';
+            inputBox.value = sqlTableProvider?.filterText ?? '';
+            inputBox.onDidChangeValue(text => sqlTableProvider?.setFilter(text));
+            inputBox.onDidAccept(() => inputBox.hide());
+            inputBox.onDidHide(() => inputBox.dispose());
+            inputBox.show();
+        }),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.clearFilter', () => {
+            sqlTableProvider?.setFilter('');
+        }),
     );
 
     sqlTableProvider.refresh();
@@ -3708,6 +3853,7 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
 // ─── activate ────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
+    extContext = context;
     panelProvider = new OpenBasePanelProvider();
     setupStatusBar(context);
     setupSqlTableBrowser(context);
