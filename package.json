@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.3.8",
+  "version": "10.3.9",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -45,6 +45,11 @@
           "id": "openbase-migrationrunner",
           "title": "OpenBase Migration Runner",
           "icon": "icon-migrationrunner.svg"
+        },
+        {
+          "id": "openbase-monitor",
+          "title": "OpenBase Monitor",
+          "icon": "icon-monitor.svg"
         }
       ]
     },
@@ -105,6 +110,13 @@
         {
           "id": "openbase.migrationrunner.migrations",
           "name": "Migrations"
+        }
+      ],
+      "openbase-monitor": [
+        {
+          "type": "webview",
+          "id": "openbase.monitor.sidebar",
+          "name": "Monitor"
         }
       ]
     },
@@ -330,6 +342,11 @@
         "title": "Migrate to This Version",
         "category": "OpenBase",
         "icon": "$(arrow-right)"
+      },
+      {
+        "command": "openbase.monitor",
+        "title": "OpenBase: Monitor",
+        "category": "OpenBase"
       }
     ],
     "keybindings": [

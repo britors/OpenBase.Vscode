@@ -4891,6 +4891,310 @@ function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── monitor ─────────────────────────────────────────────────────────────────
+
+let monitorPanel: vscode.WebviewPanel | undefined;
+let monitorTimer: ReturnType<typeof setInterval> | undefined;
+let monPrevCpu: { idle: number; total: number } | undefined;
+let monPrevDisk: { r: number; w: number; ts: number } | undefined;
+let monPrevNet: { rx: number; tx: number; ts: number } | undefined;
+
+function monReadCpu(): { idle: number; total: number } | undefined {
+    try {
+        const fields = fs.readFileSync('/proc/stat', 'utf-8').split('\n')[0]
+            .trim().split(/\s+/).slice(1).map(Number);
+        const idle = (fields[3] ?? 0) + (fields[4] ?? 0);
+        return { idle, total: fields.reduce((s, v) => s + v, 0) };
+    } catch { return undefined; }
+}
+
+function monReadMem(): { totalMB: number; usedMB: number } {
+    try {
+        const t = fs.readFileSync('/proc/meminfo', 'utf-8');
+        const n = (k: string) => parseInt(t.match(new RegExp(k + ':\\s*(\\d+)'))?.[1] ?? '0', 10);
+        return { totalMB: Math.round(n('MemTotal') / 1024), usedMB: Math.round((n('MemTotal') - n('MemAvailable')) / 1024) };
+    } catch { return { totalMB: 0, usedMB: 0 }; }
+}
+
+function monReadDisk(): { r: number; w: number } {
+    try {
+        let r = 0, w = 0;
+        for (const line of fs.readFileSync('/proc/diskstats', 'utf-8').split('\n')) {
+            const p = line.trim().split(/\s+/);
+            if (p.length < 14 || !/^(sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z])$/.test(p[2])) continue;
+            r += parseInt(p[5], 10);
+            w += parseInt(p[9], 10);
+        }
+        return { r: r * 512, w: w * 512 };
+    } catch { return { r: 0, w: 0 }; }
+}
+
+function monReadNet(): { rx: number; tx: number } {
+    try {
+        let rx = 0, tx = 0;
+        for (const line of fs.readFileSync('/proc/net/dev', 'utf-8').split('\n').slice(2)) {
+            const colon = line.indexOf(':');
+            if (colon < 0) continue;
+            const iface = line.slice(0, colon).trim();
+            if (iface === 'lo') continue;
+            const parts = line.slice(colon + 1).trim().split(/\s+/);
+            rx += parseInt(parts[0], 10) || 0;
+            tx += parseInt(parts[8], 10) || 0;
+        }
+        return { rx, tx };
+    } catch { return { rx: 0, tx: 0 }; }
+}
+
+function monCollectOs() {
+    const now = Date.now();
+
+    const cpu = monReadCpu();
+    let cpuPct = -1;
+    if (cpu && monPrevCpu) {
+        const dt = cpu.total - monPrevCpu.total;
+        const di = cpu.idle - monPrevCpu.idle;
+        cpuPct = dt > 0 ? Math.max(0, Math.min(100, Math.round(100 * (dt - di) / dt))) : 0;
+    }
+    if (cpu) monPrevCpu = cpu;
+
+    const mem = monReadMem();
+    const memPct = mem.totalMB > 0 ? Math.round(100 * mem.usedMB / mem.totalMB) : -1;
+
+    const disk = monReadDisk();
+    let diskR = -1, diskW = -1;
+    if (monPrevDisk) {
+        const dt = (now - monPrevDisk.ts) / 1000;
+        if (dt > 0) {
+            diskR = Math.max(0, (disk.r - monPrevDisk.r) / 1024 / 1024 / dt);
+            diskW = Math.max(0, (disk.w - monPrevDisk.w) / 1024 / 1024 / dt);
+        }
+    }
+    monPrevDisk = { r: disk.r, w: disk.w, ts: now };
+
+    const net = monReadNet();
+    let netRx = -1, netTx = -1;
+    if (monPrevNet) {
+        const dt = (now - monPrevNet.ts) / 1000;
+        if (dt > 0) {
+            netRx = Math.max(0, (net.rx - monPrevNet.rx) / 1024 / 1024 / dt);
+            netTx = Math.max(0, (net.tx - monPrevNet.tx) / 1024 / 1024 / dt);
+        }
+    }
+    monPrevNet = { rx: net.rx, tx: net.tx, ts: now };
+
+    return { cpuPct, memUsedMB: mem.usedMB, memTotalMB: mem.totalMB, memPct, diskR, diskW, netRx, netTx };
+}
+
+function monCollectDotnet(): Array<{ pid: number; name: string; memMB: number; threads: number }> {
+    const result: Array<{ pid: number; name: string; memMB: number; threads: number }> = [];
+    try {
+        for (const e of fs.readdirSync('/proc', { withFileTypes: true })) {
+            if (!e.isDirectory() || !/^\d+$/.test(e.name)) continue;
+            const pid = parseInt(e.name, 10);
+            try {
+                const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim();
+                if (!cmd.toLowerCase().includes('dotnet')) continue;
+                const dll = cmd.split(' ').find(p => p.endsWith('.dll'));
+                const name = dll ? path.basename(dll, '.dll') : 'dotnet';
+                const status = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
+                const vmRss  = parseInt(status.match(/VmRSS:\s*(\d+)/)?.[1]  ?? '0', 10);
+                const threads = parseInt(status.match(/Threads:\s*(\d+)/)?.[1] ?? '0', 10);
+                result.push({ pid, name, memMB: Math.round(vmRss / 1024), threads });
+            } catch { /* process exited or no perms */ }
+        }
+    } catch { /* /proc not available */ }
+    return result.sort((a, b) => b.memMB - a.memMB);
+}
+
+function monStartPolling(intervalMs: number): void {
+    if (monitorTimer) clearInterval(monitorTimer);
+    monitorTimer = setInterval(() => {
+        if (!monitorPanel) { if (monitorTimer) clearInterval(monitorTimer); return; }
+        monitorPanel.webview.postMessage({ command: 'metrics', os: monCollectOs(), dotnet: monCollectDotnet() });
+    }, intervalMs);
+}
+
+async function monitor(): Promise<void> {
+    if (monitorPanel) { monitorPanel.reveal(vscode.ViewColumn.One); return; }
+
+    const nonce = getNonce();
+    monitorPanel = vscode.window.createWebviewPanel(
+        'openbase.monitor', 'Monitor',
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    monitorPanel.onDidDispose(() => {
+        if (monitorTimer) clearInterval(monitorTimer);
+        monitorTimer = undefined;
+        monPrevCpu = undefined; monPrevDisk = undefined; monPrevNet = undefined;
+        monitorPanel = undefined;
+    });
+    monitorPanel.webview.html = buildMonitorHtml(nonce, monitorPanel.webview.cspSource);
+
+    let intervalMs = 2000;
+    monitorPanel.webview.onDidReceiveMessage((msg: { command: string; interval?: number }) => {
+        if (msg.command === 'setInterval' && msg.interval) {
+            intervalMs = msg.interval;
+            if (monitorTimer !== undefined) monStartPolling(intervalMs);
+        } else if (msg.command === 'pause') {
+            if (monitorTimer) clearInterval(monitorTimer);
+            monitorTimer = undefined;
+        } else if (msg.command === 'resume') {
+            monStartPolling(intervalMs);
+        }
+    });
+
+    monCollectOs(); // seed delta state
+    monStartPolling(intervalMs);
+}
+
+function buildMonitorHtml(nonce: string, cspSource: string): string {
+    void cspSource;
+    return /* html */`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>
+  :root{--bg1:var(--vscode-editor-background,#1e1e1e);--bg2:var(--vscode-sideBar-background,#252526);--border:var(--vscode-panel-border,rgba(128,128,128,.2));--text:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#858585);--purple:#b44fff;--green:#4ec994;--yellow:#e5c07b}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--vscode-font-family,sans-serif);font-size:var(--vscode-font-size,13px);color:var(--text);background:var(--bg1);display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  .toolbar{display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+  .btn{padding:2px 8px;font-size:11px;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:2px}
+  .btn:hover{background:var(--purple);color:#fff;border-color:var(--purple)}
+  select{background:var(--bg1);color:var(--text);border:1px solid var(--border);padding:2px 5px;font-size:11px;font-family:inherit;border-radius:2px;outline:none}
+  .lbl{font-size:11px;color:var(--dim)}
+  .badge-run{display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;background:var(--purple);color:#fff}
+  .badge-pause{display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;border:1px solid var(--border);color:var(--dim)}
+  .content{flex:1;overflow-y:auto;padding:10px}
+  .section{margin-bottom:16px}
+  .section-hdr{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+  .metric{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+  .m-lbl{font-size:11px;color:var(--dim);width:58px;flex-shrink:0}
+  .bar-track{flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:3px;transition:width .5s ease}
+  .bar-cpu{background:var(--purple)}
+  .bar-mem{background:var(--green)}
+  .m-val{font-size:11px;min-width:90px;text-align:right;color:var(--text)}
+  .io-row{display:flex;gap:6px;margin-top:4px}
+  .io-box{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:3px;padding:5px 8px}
+  .io-title{font-size:10px;color:var(--dim);margin-bottom:3px}
+  .io-vals{display:flex;gap:8px;font-size:11px}
+  .io-up::before{content:'↑ ';color:var(--purple)}
+  .io-dn::before{content:'↓ ';color:var(--green)}
+  .proc-row{display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:3px;background:var(--bg2);border:1px solid var(--border);border-radius:3px}
+  .proc-name{flex:1;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .proc-pid{font-size:10px;color:var(--dim)}
+  .proc-tag{font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(180,79,255,.15);color:var(--purple);white-space:nowrap}
+  .empty{font-size:11px;color:var(--dim);font-style:italic}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button id="tog" class="btn" onclick="toggle()">&#9646;&#9646; Pause</button>
+  <span class="lbl">Every</span>
+  <select id="ivl" onchange="chgInterval()">
+    <option value="1000">1s</option>
+    <option value="2000" selected>2s</option>
+    <option value="5000">5s</option>
+  </select>
+  <span id="badge" class="badge-run">Running</span>
+</div>
+<div class="content">
+  <div class="section">
+    <div class="section-hdr">System</div>
+    <div class="metric">
+      <span class="m-lbl">CPU</span>
+      <div class="bar-track"><div id="cpu-fill" class="bar-fill bar-cpu" style="width:0%"></div></div>
+      <span id="cpu-val" class="m-val">--</span>
+    </div>
+    <div class="metric">
+      <span class="m-lbl">Memory</span>
+      <div class="bar-track"><div id="mem-fill" class="bar-fill bar-mem" style="width:0%"></div></div>
+      <span id="mem-val" class="m-val">--</span>
+    </div>
+    <div class="io-row">
+      <div class="io-box">
+        <div class="io-title">Disk</div>
+        <div class="io-vals"><span class="io-up" id="disk-w">--</span><span class="io-dn" id="disk-r">--</span></div>
+      </div>
+      <div class="io-box">
+        <div class="io-title">Network</div>
+        <div class="io-vals"><span class="io-up" id="net-tx">--</span><span class="io-dn" id="net-rx">--</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-hdr">.NET Processes</div>
+    <div id="dotnet-list"><span class="empty">No .NET processes detected</span></div>
+  </div>
+</div>
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  var paused = false;
+
+  function toggle() {
+    paused = !paused;
+    document.getElementById('tog').innerHTML = paused ? '&#9654; Resume' : '&#9646;&#9646; Pause';
+    var b = document.getElementById('badge');
+    b.className = paused ? 'badge-pause' : 'badge-run';
+    b.textContent = paused ? 'Paused' : 'Running';
+    vscode.postMessage({ command: paused ? 'pause' : 'resume' });
+  }
+
+  function chgInterval() {
+    vscode.postMessage({ command: 'setInterval', interval: parseInt(document.getElementById('ivl').value, 10) });
+  }
+
+  function fmtMbs(v) {
+    if (v < 0) return '--';
+    if (v < 0.1) return (v * 1024).toFixed(0) + ' KB/s';
+    return v.toFixed(1) + ' MB/s';
+  }
+  function fmtMb(v) {
+    if (v < 0) return '--';
+    return v >= 1024 ? (v / 1024).toFixed(1) + ' GB' : v + ' MB';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  window.addEventListener('message', function(e) {
+    var m = e.data;
+    if (m.command !== 'metrics') return;
+    var o = m.os;
+
+    var cpuPct = o.cpuPct;
+    document.getElementById('cpu-fill').style.width = (cpuPct >= 0 ? cpuPct : 0) + '%';
+    document.getElementById('cpu-val').textContent = cpuPct >= 0 ? cpuPct + '%' : '--';
+
+    var memPct = o.memPct;
+    document.getElementById('mem-fill').style.width = (memPct >= 0 ? memPct : 0) + '%';
+    document.getElementById('mem-val').textContent = memPct >= 0 ? fmtMb(o.memUsedMB) + ' / ' + fmtMb(o.memTotalMB) : '--';
+
+    document.getElementById('disk-w').textContent = fmtMbs(o.diskW);
+    document.getElementById('disk-r').textContent = fmtMbs(o.diskR);
+    document.getElementById('net-tx').textContent = fmtMbs(o.netTx);
+    document.getElementById('net-rx').textContent = fmtMbs(o.netRx);
+
+    var procs = m.dotnet;
+    var el = document.getElementById('dotnet-list');
+    if (!procs || !procs.length) {
+      el.innerHTML = '<span class="empty">No .NET processes detected</span>';
+      return;
+    }
+    el.innerHTML = procs.map(function(p) {
+      return '<div class="proc-row">' +
+        '<span class="proc-name">' + esc(p.name) + '</span>' +
+        '<span class="proc-pid">PID ' + p.pid + '</span>' +
+        '<span class="proc-tag">' + p.memMB + ' MB</span>' +
+        '<span class="proc-tag">' + p.threads + ' thr</span>' +
+        '</div>';
+    }).join('');
+  });
+</script>
+</body></html>`;
+}
+
 // ─── migration runner ────────────────────────────────────────────────────────
 
 interface MigrationInfo {
@@ -5216,6 +5520,8 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider('openbase.erdiagram.sidebar', new RunnerSidebarProvider('ER Diagram', 'Open ER Diagram', openErDiagram)),
         vscode.window.registerWebviewViewProvider('openbase.logviewer.sidebar', new RunnerSidebarProvider('Log Viewer', 'Open Log Viewer', logViewer)),
         vscode.window.registerWebviewViewProvider('openbase.migrationrunner.sidebar', new RunnerSidebarProvider('Migration Runner', 'Refresh Migrations', () => migrationProvider?.refresh())),
+        vscode.window.registerWebviewViewProvider('openbase.monitor.sidebar', new RunnerSidebarProvider('Monitor', 'Open Monitor', () => { monitor(); })),
+        vscode.commands.registerCommand('openbase.monitor', () => monitor()),
         vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
         vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
         reg('openbase.newProject',     newProject),
