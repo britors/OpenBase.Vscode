@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.4.3",
+  "version": "10.4.4",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -37,24 +37,14 @@
           "icon": "icon-erdiagram.svg"
         },
         {
-          "id": "openbase-logviewer",
-          "title": "OpenBase Log Viewer",
-          "icon": "icon-logviewer.svg"
-        },
-        {
           "id": "openbase-migrationrunner",
           "title": "OpenBase Migration Runner",
           "icon": "icon-migrationrunner.svg"
         },
         {
-          "id": "openbase-monitor",
-          "title": "OpenBase Monitor",
-          "icon": "icon-monitor.svg"
-        },
-        {
-          "id": "openbase-depinspector",
-          "title": "OpenBase Dependency Inspector",
-          "icon": "icon-depinspector.svg"
+          "id": "openbase-tools",
+          "title": "OpenBase Tools",
+          "icon": "icon-tools.svg"
         }
       ]
     },
@@ -90,6 +80,10 @@
         {
           "id": "openbase.httprunner.requests",
           "name": "Requests"
+        },
+        {
+          "id": "openbase.httprunner.endpoints",
+          "name": "Endpoints Map"
         }
       ],
       "openbase-erdiagram": [
@@ -97,13 +91,6 @@
           "type": "webview",
           "id": "openbase.erdiagram.sidebar",
           "name": "ER Diagram"
-        }
-      ],
-      "openbase-logviewer": [
-        {
-          "type": "webview",
-          "id": "openbase.logviewer.sidebar",
-          "name": "Log Viewer"
         }
       ],
       "openbase-migrationrunner": [
@@ -117,14 +104,17 @@
           "name": "Migrations"
         }
       ],
-      "openbase-monitor": [
+      "openbase-tools": [
+        {
+          "type": "webview",
+          "id": "openbase.logviewer.sidebar",
+          "name": "Log Viewer"
+        },
         {
           "type": "webview",
           "id": "openbase.monitor.sidebar",
           "name": "Monitor"
-        }
-      ],
-      "openbase-depinspector": [
+        },
         {
           "type": "webview",
           "id": "openbase.depinspector.sidebar",
@@ -337,6 +327,18 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "openbase.endpointsMap.refresh",
+        "title": "Refresh Endpoints",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.endpointsMap.open",
+        "title": "Open in HTTP Runner",
+        "category": "OpenBase",
+        "icon": "$(play)"
+      },
+      {
         "command": "openbase.migrationRunner",
         "title": "OpenBase: Migration Runner",
         "category": "OpenBase"
@@ -498,6 +500,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "openbase.endpointsMap.refresh",
+          "when": "view == openbase.httprunner.endpoints",
+          "group": "navigation"
+        },
+        {
           "command": "openbase.migrationRunner.migrateUp",
           "when": "view == openbase.migrationrunner.migrations",
           "group": "navigation@1"
@@ -593,6 +600,11 @@
           "command": "openbase.httpRunner.requests.delete",
           "when": "view == openbase.httprunner.requests",
           "group": "2_edit@2"
+        },
+        {
+          "command": "openbase.endpointsMap.open",
+          "when": "view == openbase.httprunner.endpoints && viewItem == endpoint",
+          "group": "inline"
         },
         {
           "command": "openbase.migrationRunner.dryRunTo",
