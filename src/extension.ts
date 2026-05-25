@@ -8,12 +8,10 @@ import { execSync, exec, spawn } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
-const EXTENSIONS = ['jwt', 'cache', 'healthchecks'] as const;
+const EXTENSIONS = ['jwt', 'redis', 'healthchecks', 'mongodb'] as const;
 const SPECIALIST_TYPES = ['query', 'command', 'httpcall'] as const;
 const PARAM_TYPES = ['string', 'int', 'bool', 'decimal', 'Guid', 'DateTime', 'long', 'double', 'float', 'short'] as const;
-const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {
-    cache: ['redis', 'azure'],
-};
+const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {};
 
 type DbTemplate = typeof DB_TEMPLATES[number];
 type BuildConfig = typeof BUILD_CONFIGS[number];
@@ -543,8 +541,9 @@ function dbTemplateLabel(t: DbTemplate): string {
 function extensionLabel(e: string): string {
     switch (e) {
         case 'jwt':          return 'JWT Authentication';
-        case 'cache':        return 'Distributed Cache';
+        case 'redis':        return 'Redis';
         case 'healthchecks': return 'Health Checks';
+        case 'mongodb':      return 'MongoDB';
         default:             return e;
     }
 }
@@ -954,16 +953,11 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <!-- EXTENSION -->
   <div id="page-ext" class="page">
     <div class="field"><label>Extension</label>
-      <select id="ext-name" onchange="onExtChange()">
+      <select id="ext-name">
         <option value="jwt">JWT Authentication</option>
         <option value="healthchecks">Health Checks</option>
-        <option value="cache">Distributed Cache</option>
-      </select>
-    </div>
-    <div id="ext-prov-field" class="field hidden"><label>Provider</label>
-      <select id="ext-prov">
         <option value="redis">Redis</option>
-        <option value="azure">Azure Cache</option>
+        <option value="mongodb">MongoDB</option>
       </select>
     </div>
     <div id="ext-err" class="err"></div>
@@ -1028,9 +1022,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       var mf = document.getElementById('sc-mode').value === 'modelfirst';
       document.getElementById('sc-mf').classList.toggle('hidden', !mf);
       document.getElementById('sc-cf-hint').classList.toggle('hidden', mf);
-    }
-    function onExtChange() {
-      document.getElementById('ext-prov-field').classList.toggle('hidden', document.getElementById('ext-name').value !== 'cache');
     }
     function onSpType() {
       var type = document.getElementById('sp-type').value;
@@ -1215,10 +1206,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       err('ext', '');
       loading('ext', true);
       var name = document.getElementById('ext-name').value;
-      vscode.postMessage({ command: 'extensionAdd', data: {
-        name: name,
-        provider: name === 'cache' ? document.getElementById('ext-prov').value : '',
-      }});
+      vscode.postMessage({ command: 'extensionAdd', data: { name: name } });
     }
 
     function submitBuild() {
