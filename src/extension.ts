@@ -6952,7 +6952,7 @@ function setupEndpointsMap(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.endpointsMap.open', async (item: EndpointItem) => {
             if (!(item instanceof EndpointItem)) return;
             const { method, route } = item.endpoint;
-            const data: HttpRequestData = { method: method.toUpperCase(), url: route };
+            const data: HttpRequestData = { method: method.toUpperCase(), url: '{{LOCAL_URL}}' + route };
             if (httpPanel) {
                 httpPanel.reveal(vscode.ViewColumn.One);
                 httpPanel.webview.postMessage({ command: 'loadRequest', ...data });
