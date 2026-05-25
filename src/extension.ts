@@ -6827,7 +6827,9 @@ function setupEndpointsMap(context: vscode.ExtensionContext): void {
 
 // ─── solution explorer ───────────────────────────────────────────────────────
 
-type SolutionNodeKind = 'solution' | 'project' | 'folder' | 'file';
+type SolutionNodeKind = 'solution' | 'solutionFolder' | 'project' | 'folder' | 'file';
+
+const SE_SOLUTION_FOLDER_TYPE = '2150E333-8FDC-42A3-9474-1A3956D46DE8';
 
 const SE_IGNORED_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs', '.idea']);
 
@@ -6851,6 +6853,8 @@ const SE_FILE_ICONS: Record<string, string> = {
 };
 
 class SolutionNode extends vscode.TreeItem {
+    public slnChildren: SolutionNode[] = [];
+
     constructor(
         public readonly fsPath: string,
         public readonly kind: SolutionNodeKind,
@@ -6863,24 +6867,34 @@ class SolutionNode extends vscode.TreeItem {
                 : vscode.TreeItemCollapsibleState.Collapsed,
         );
         this.contextValue = kind;
-        this.tooltip = fsPath;
-        this.resourceUri = vscode.Uri.file(fsPath);
 
         switch (kind) {
             case 'solution':
                 this.iconPath = new vscode.ThemeIcon('layers');
+                this.tooltip = fsPath;
+                this.resourceUri = vscode.Uri.file(fsPath);
+                break;
+            case 'solutionFolder':
+                this.iconPath = vscode.ThemeIcon.Folder;
+                this.tooltip = label;
                 break;
             case 'project':
                 this.iconPath = new vscode.ThemeIcon('symbol-namespace');
                 this.description = '.csproj';
+                this.tooltip = fsPath;
+                this.resourceUri = vscode.Uri.file(fsPath);
                 break;
             case 'folder':
                 this.iconPath = vscode.ThemeIcon.Folder;
+                this.tooltip = fsPath;
+                this.resourceUri = vscode.Uri.file(fsPath);
                 break;
             case 'file':
                 this.iconPath = new vscode.ThemeIcon(
                     SE_FILE_ICONS[path.extname(fsPath).toLowerCase()] ?? 'file',
                 );
+                this.tooltip = fsPath;
+                this.resourceUri = vscode.Uri.file(fsPath);
                 this.command = {
                     command: 'vscode.open',
                     title: 'Open File',
@@ -6891,20 +6905,58 @@ class SolutionNode extends vscode.TreeItem {
     }
 }
 
-function parseSln(slnPath: string): { name: string; csprojPath: string }[] {
+function buildSlnChildren(slnPath: string): SolutionNode[] {
     let content: string;
     try { content = fs.readFileSync(slnPath, 'utf-8'); } catch { return []; }
-    const dir = path.dirname(slnPath);
-    const results: { name: string; csprojPath: string }[] = [];
-    const re = /^Project\("[^"]+"\)\s*=\s*"([^"]+)",\s*"([^"\\]+(?:\\[^"\\]+)*\.csproj)"/gm;
+    const slnDir = path.dirname(slnPath);
+
+    // Parse all Project(...) = "name", "path", "{guid}" entries
+    const nodeMap = new Map<string, SolutionNode>();
+    const order: string[] = [];
+    const re = /^Project\("\{([^}]+)\}"\)\s*=\s*"([^"]+)",\s*"([^"]+)",\s*"\{([^}]+)\}"/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(content)) !== null) {
-        const name = m[1];
-        const rel = m[2].replace(/\\/g, path.sep);
-        const csprojPath = path.resolve(dir, rel);
-        if (fs.existsSync(csprojPath)) results.push({ name, csprojPath });
+        const typeGuid = m[1].toUpperCase();
+        const name = m[2];
+        const entryPath = m[3];
+        const guid = m[4].toUpperCase();
+        let node: SolutionNode;
+        if (typeGuid === SE_SOLUTION_FOLDER_TYPE) {
+            node = new SolutionNode('', 'solutionFolder', name);
+        } else {
+            const csprojPath = path.resolve(slnDir, entryPath.replace(/\\/g, path.sep));
+            if (!fs.existsSync(csprojPath)) continue;
+            node = new SolutionNode(csprojPath, 'project', name);
+        }
+        nodeMap.set(guid, node);
+        order.push(guid);
     }
-    return results;
+
+    // Parse GlobalSection(NestedProjects): child GUID = parent GUID
+    const nested = new Map<string, string>();
+    const nestedMatch = content.match(/GlobalSection\(NestedProjects\)\s*=\s*preSolution([\s\S]*?)EndGlobalSection/);
+    if (nestedMatch) {
+        const nestedRe = /\{([^}]+)\}\s*=\s*\{([^}]+)\}/g;
+        let nm: RegExpExecArray | null;
+        while ((nm = nestedRe.exec(nestedMatch[1])) !== null) {
+            nested.set(nm[1].toUpperCase(), nm[2].toUpperCase());
+        }
+    }
+
+    // Attach children to solution folder nodes; collect top-level nodes
+    const topLevel: SolutionNode[] = [];
+    for (const guid of order) {
+        const node = nodeMap.get(guid);
+        if (!node) continue;
+        const parentGuid = nested.get(guid);
+        const parent = parentGuid ? nodeMap.get(parentGuid) : undefined;
+        if (parent) {
+            parent.slnChildren.push(node);
+        } else {
+            topLevel.push(node);
+        }
+    }
+    return topLevel;
 }
 
 function seWalkDir(dir: string): SolutionNode[] {
@@ -6936,6 +6988,7 @@ class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> 
     getChildren(element?: SolutionNode): vscode.ProviderResult<SolutionNode[]> {
         if (!element) return this._roots();
         if (element.kind === 'solution') return this._projectsFromSln(element.fsPath);
+        if (element.kind === 'solutionFolder') return element.slnChildren;
         if (element.kind === 'project') return seWalkDir(path.dirname(element.fsPath));
         if (element.kind === 'folder') return seWalkDir(element.fsPath);
         return [];
@@ -6958,7 +7011,7 @@ class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> 
     }
 
     private _projectsFromSln(slnPath: string): SolutionNode[] {
-        return parseSln(slnPath).map(p => new SolutionNode(p.csprojPath, 'project', p.name));
+        return buildSlnChildren(slnPath);
     }
 
     private _findCsprojs(dir: string): SolutionNode[] {
