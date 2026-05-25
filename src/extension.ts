@@ -800,7 +800,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net data:; worker-src blob: data:;">
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground)}
@@ -922,7 +922,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         <option value="httpcall">httpcall — External HTTP call</option>
       </select>
     </div>
-    <div id="sp-sql-field" class="field"><label>SQL *</label><textarea id="sp-sql" rows="8" placeholder="SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}"></textarea></div>
+    <div id="sp-sql-field" class="field"><label>SQL *</label><div id="sp-sql-editor" style="height:180px;border:1px solid var(--vscode-input-border,#444);border-radius:3px;overflow:hidden;position:relative"><div id="sp-sql-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;opacity:.4;pointer-events:none">Loading editor…</div></div></div>
     <hr>
     <div class="field">
       <label>Parameters</label>
@@ -1069,7 +1069,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       } else if (ctx === 'sp') {
         document.getElementById('sp-entity').value = '';
         document.getElementById('sp-method').value = '';
-        document.getElementById('sp-sql').value = '';
+        if (spEditor) spEditor.setValue('');
         document.getElementById('sp-params').innerHTML = '';
         document.getElementById('sp-cols').innerHTML = '';
       } else if (ctx === 'pr') {
@@ -1104,12 +1104,11 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         var navEl = document.querySelector('.nav-item[data-page="' + m.tab + '"]');
         if (navEl) nav(navEl, m.tab);
         if (m.tab === 'sp' && m.query) {
-          var fld = document.getElementById('sp-sql');
-          if (fld) {
-            fld.value = m.query;
-            fld.focus();
-            fld.style.outline = '2px solid var(--vscode-focusBorder)';
-            setTimeout(function() { fld.style.outline = ''; }, 1200);
+          if (spEditor) {
+            spEditor.setValue(m.query);
+            spEditor.focus();
+          } else {
+            spEditorPending = m.query;
           }
         }
         return;
@@ -1185,7 +1184,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       var entity = document.getElementById('sp-entity').value.trim();
       var method = document.getElementById('sp-method').value.trim();
       var type   = document.getElementById('sp-type').value;
-      var sql    = document.getElementById('sp-sql').value.trim();
+      var sql    = (spEditor ? spEditor.getValue() : '').trim();
       err('sp', '');
       if (!entity) { err('sp', 'Entity name is required.'); return; }
       if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('sp', 'Entity must be PascalCase (e.g. Product).'); return; }
@@ -1253,6 +1252,72 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       loading('update', true);
       vscode.postMessage({ command: 'update' });
     }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
+  <script>
+    var spEditor = null;
+    var spEditorPending = null;
+    window.MonacoEnvironment = { getWorkerUrl: function() { return 'data:text/javascript;charset=utf-8,' + encodeURIComponent('self.onmessage=function(){};'); } };
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs' } });
+    require(['vs/editor/editor.main'], function() {
+      monaco.editor.defineTheme('openbase-dark', {
+        base: 'vs-dark', inherit: true,
+        rules: [
+          { token: 'keyword.sql', foreground: 'c084fc', fontStyle: 'bold' },
+          { token: 'keyword',     foreground: 'c084fc', fontStyle: 'bold' },
+          { token: 'string.sql',  foreground: 'f472b6' },
+          { token: 'string',      foreground: 'f472b6' },
+          { token: 'number',      foreground: '67e8f9' },
+          { token: 'comment',     foreground: '4b3f6b', fontStyle: 'italic' },
+          { token: 'operator',    foreground: 'e879f9' },
+          { token: 'identifier',  foreground: 'ede8f8' },
+          { token: 'predefined',  foreground: 'a78bfa' },
+        ],
+        colors: {
+          'editor.background':                  '#0d0f1a',
+          'editor.foreground':                  '#ede8f8',
+          'editor.lineHighlightBackground':     '#1c153528',
+          'editor.selectionBackground':         '#b44fff33',
+          'editor.inactiveSelectionBackground': '#b44fff1a',
+          'editorLineNumber.foreground':        '#3d3060',
+          'editorLineNumber.activeForeground':  '#b44fff',
+          'editorCursor.foreground':            '#b44fff',
+          'editorWidget.background':            '#131629',
+          'editorWidget.border':                '#b44fff44',
+          'scrollbarSlider.background':         '#b44fff22',
+          'scrollbarSlider.hoverBackground':    '#b44fff44',
+          'scrollbarSlider.activeBackground':   '#b44fff66',
+          'editorGutter.background':            '#0d0f1a',
+        }
+      });
+      spEditor = monaco.editor.create(document.getElementById('sp-sql-editor'), {
+        value: '',
+        language: 'sql',
+        theme: 'openbase-dark',
+        minimap: { enabled: false },
+        fontSize: 13,
+        lineNumbers: 'on',
+        automaticLayout: true,
+        wordWrap: 'off',
+        scrollBeyondLastLine: false,
+        renderLineHighlight: 'line',
+        padding: { top: 8, bottom: 8 },
+        quickSuggestions: true,
+        folding: false,
+        tabSize: 2,
+        insertSpaces: true,
+        overviewRulerLanes: 0,
+        scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+        contextmenu: false,
+        placeholder: 'SELECT Nome FROM Produtos WHERE CategoriaId = {{categoriaId}}',
+      });
+      document.getElementById('sp-sql-loading').style.display = 'none';
+      if (spEditorPending !== null) {
+        spEditor.setValue(spEditorPending);
+        spEditor.focus();
+        spEditorPending = null;
+      }
+    });
   </script>
 </body>
 </html>`;
