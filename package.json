@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.4.3",
+  "version": "10.4.4",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -90,6 +90,10 @@
         {
           "id": "openbase.httprunner.requests",
           "name": "Requests"
+        },
+        {
+          "id": "openbase.httprunner.endpoints",
+          "name": "Endpoints Map"
         }
       ],
       "openbase-erdiagram": [
@@ -337,6 +341,18 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "openbase.endpointsMap.refresh",
+        "title": "Refresh Endpoints",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.endpointsMap.open",
+        "title": "Open in HTTP Runner",
+        "category": "OpenBase",
+        "icon": "$(play)"
+      },
+      {
         "command": "openbase.migrationRunner",
         "title": "OpenBase: Migration Runner",
         "category": "OpenBase"
@@ -498,6 +514,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "openbase.endpointsMap.refresh",
+          "when": "view == openbase.httprunner.endpoints",
+          "group": "navigation"
+        },
+        {
           "command": "openbase.migrationRunner.migrateUp",
           "when": "view == openbase.migrationrunner.migrations",
           "group": "navigation@1"
@@ -593,6 +614,11 @@
           "command": "openbase.httpRunner.requests.delete",
           "when": "view == openbase.httprunner.requests",
           "group": "2_edit@2"
+        },
+        {
+          "command": "openbase.endpointsMap.open",
+          "when": "view == openbase.httprunner.endpoints && viewItem == endpoint",
+          "group": "inline"
         },
         {
           "command": "openbase.migrationRunner.dryRunTo",
