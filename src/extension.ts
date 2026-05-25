@@ -7060,6 +7060,158 @@ class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> 
     }
 }
 
+function seReadLaunchUrl(projDir: string): string | undefined {
+    try {
+        const raw = fs.readFileSync(path.join(projDir, 'Properties', 'launchSettings.json'), 'utf-8');
+        const json = JSON.parse(raw);
+        for (const profile of Object.values(json?.profiles ?? {}) as Record<string, string>[]) {
+            if (profile.applicationUrl) {
+                const urls = profile.applicationUrl.split(';');
+                return urls.find(u => u.startsWith('https')) ?? urls[0];
+            }
+        }
+    } catch {}
+    return undefined;
+}
+
+function writePubxml(profilesDir: string, name: string, content: string): void {
+    fs.mkdirSync(profilesDir, { recursive: true });
+    fs.writeFileSync(path.join(profilesDir, `${name}.pubxml`), content, 'utf-8');
+}
+
+async function sePublishProject(cwd: string): Promise<void> {
+    const proj = findEntryProject(cwd);
+    if (!proj) { vscode.window.showErrorMessage('Nenhum projeto encontrado para publicar.'); return; }
+
+    const projDir   = path.dirname(proj.csprojPath);
+    const profilesDir = path.join(projDir, 'Properties', 'PublishProfiles');
+
+    let existing: string[] = [];
+    try { existing = fs.readdirSync(profilesDir).filter(f => f.endsWith('.pubxml')).map(f => path.basename(f, '.pubxml')); } catch {}
+
+    const items: vscode.QuickPickItem[] = [
+        ...existing.map(p => ({ label: p, description: 'perfil salvo', iconPath: new vscode.ThemeIcon('file-code') })),
+        ...(existing.length ? [{ label: '', kind: vscode.QuickPickItemKind.Separator }] : []),
+        { label: '$(folder)  Pasta local',       description: 'Publicar em uma pasta local' },
+        { label: '$(globe)   FTP',                description: 'Publicar via FTP' },
+        { label: '$(server)  Web Deploy (IIS)',   description: 'Publicar via Web Deploy no IIS' },
+    ];
+
+    const picked = await vscode.window.showQuickPick(items, { title: 'OpenBase: Publicar — Destino' });
+    if (!picked || picked.kind === vscode.QuickPickItemKind.Separator) return;
+
+    if (existing.includes(picked.label)) {
+        openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${picked.label}"`);
+        return;
+    }
+
+    if (picked.label.includes('Pasta local'))    { await sePublishLocal(proj, projDir, profilesDir); return; }
+    if (picked.label.includes('FTP'))            { await sePublishFtp(proj, projDir, profilesDir);   return; }
+    if (picked.label.includes('Web Deploy'))     { await sePublishWebDeploy(proj, projDir, profilesDir); }
+}
+
+async function sePublishLocal(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Publicar Local (1/2) — Nome do perfil', value: 'FolderPublish' });
+    if (!name) return;
+
+    const outPath = await vscode.window.showInputBox({
+        title: 'Publicar Local (2/2) — Pasta de saída',
+        value: path.join(projDir, 'bin', 'publish'),
+    });
+    if (outPath === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <DeleteExistingFiles>true</DeleteExistingFiles>
+    <LaunchSiteAfterPublish>True</LaunchSiteAfterPublish>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <PublishProvider>FileSystem</PublishProvider>
+    <PublishUrl>${outPath}</PublishUrl>
+    <WebPublishMethod>FileSystem</WebPublishMethod>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}"`);
+}
+
+async function sePublishFtp(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Publicar FTP (1/5) — Nome do perfil', value: 'FtpPublish' });
+    if (!name) return;
+    const host = await vscode.window.showInputBox({ title: 'Publicar FTP (2/5) — Servidor', placeHolder: 'ftp.exemplo.com' });
+    if (!host) return;
+    const remotePath = await vscode.window.showInputBox({ title: 'Publicar FTP (3/5) — Caminho remoto', value: '/' });
+    if (remotePath === undefined) return;
+    const user = await vscode.window.showInputBox({ title: 'Publicar FTP (4/5) — Usuário' });
+    if (user === undefined) return;
+    const password = await vscode.window.showInputBox({ title: 'Publicar FTP (5/5) — Senha', password: true });
+    if (password === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <WebPublishMethod>FTP</WebPublishMethod>
+    <PublishProtocol>FTP</PublishProtocol>
+    <PublishUrl>ftp://${host}${remotePath.startsWith('/') ? remotePath : '/' + remotePath}</PublishUrl>
+    <UserName>${user}</UserName>
+    <FTPPassiveMode>True</FTPPassiveMode>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish FTP', projDir,
+        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
+}
+
+async function sePublishWebDeploy(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Web Deploy (1/5) — Nome do perfil', value: 'WebDeployPublish' });
+    if (!name) return;
+    const serverUrl = await vscode.window.showInputBox({ title: 'Web Deploy (2/5) — URL do servidor', placeHolder: 'https://meuservidor.com:8172' });
+    if (!serverUrl) return;
+    const sitePath = await vscode.window.showInputBox({ title: 'Web Deploy (3/5) — Caminho IIS', placeHolder: 'Default Web Site/meuapp', value: 'Default Web Site' });
+    if (sitePath === undefined) return;
+    const user = await vscode.window.showInputBox({ title: 'Web Deploy (4/5) — Usuário' });
+    if (user === undefined) return;
+    const password = await vscode.window.showInputBox({ title: 'Web Deploy (5/5) — Senha', password: true });
+    if (password === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <WebPublishMethod>MSDeploy</WebPublishMethod>
+    <PublishProtocol>MSDeploy</PublishProtocol>
+    <MSDeployServiceURL>${serverUrl}</MSDeployServiceURL>
+    <DeployIisAppPath>${sitePath}</DeployIisAppPath>
+    <SkipExtraFilesOnServer>True</SkipExtraFilesOnServer>
+    <MSDeployPublishMethod>RemoteAgent</MSDeployPublishMethod>
+    <EnableMSDeployBackup>True</EnableMSDeployBackup>
+    <UserName>${user}</UserName>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish Web Deploy', projDir,
+        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
+}
+
 function setupSolutionExplorer(context: vscode.ExtensionContext): void {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!cwd) return;
@@ -7105,31 +7257,42 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
             const folder = vscode.workspace.workspaceFolders?.[0];
             if (!folder) return;
 
+            const serverReadyAction = {
+                action: 'openExternally',
+                pattern: '\\bNow listening on:\\s+(https?://\\S+)',
+            };
+
             const launchConfigs: vscode.DebugConfiguration[] | undefined =
                 vscode.workspace.getConfiguration('launch', folder.uri).get('configurations');
 
             if (launchConfigs && launchConfigs.length > 0) {
-                await vscode.debug.startDebugging(folder, launchConfigs[0]);
+                const config = { ...launchConfigs[0] };
+                if (!config.serverReadyAction) config.serverReadyAction = serverReadyAction;
+                await vscode.debug.startDebugging(folder, config);
             } else {
                 const proj = findEntryProject(cwd);
                 if (!proj) {
                     vscode.window.showErrorMessage('Nenhum projeto encontrado para depurar.');
                     return;
                 }
+                const projDir = path.dirname(proj.csprojPath);
                 const config: vscode.DebugConfiguration = {
                     name: proj.assemblyName,
                     type: 'coreclr',
                     request: 'launch',
-                    program: path.join(path.dirname(proj.csprojPath), 'bin', 'Debug', proj.targetFramework, `${proj.assemblyName}.dll`),
+                    program: path.join(projDir, 'bin', 'Debug', proj.targetFramework, `${proj.assemblyName}.dll`),
                     args: [],
-                    cwd: path.dirname(proj.csprojPath),
+                    cwd: projDir,
                     stopAtEntry: false,
                     env: { ASPNETCORE_ENVIRONMENT: 'Development' },
-                    preLaunchTask: 'dotnet: build',
+                    serverReadyAction,
                 };
                 await vscode.debug.startDebugging(folder, config);
             }
         }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.publish',
+            () => sePublishProject(cwd)),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.build',
             (item: SolutionNode) => {
