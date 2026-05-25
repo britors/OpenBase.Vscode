@@ -6975,6 +6975,32 @@ function seWalkDir(dir: string): SolutionNode[] {
 
 let solutionExplorerProvider: SolutionExplorerProvider | undefined;
 
+class SolutionExplorerDecorationProvider implements vscode.FileDecorationProvider {
+    private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<undefined>();
+    readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+
+    notifyChanged(): void { this._onDidChangeFileDecorations.fire(undefined); }
+
+    provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+        if (!uri.fsPath.endsWith('.csproj')) return undefined;
+
+        const projDir = path.dirname(uri.fsPath) + path.sep;
+        let errorCount = 0;
+        for (const [fileUri, diags] of vscode.languages.getDiagnostics()) {
+            if (!fileUri.fsPath.startsWith(projDir)) continue;
+            errorCount += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+        }
+
+        if (errorCount === 0) return undefined;
+
+        return {
+            badge: errorCount >= 100 ? '!!' : String(errorCount),
+            tooltip: `${errorCount} erro${errorCount !== 1 ? 's' : ''} de build`,
+            color: new vscode.ThemeColor('list.errorForeground'),
+        };
+    }
+}
+
 class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> {
     private _onDidChangeTreeData = new vscode.EventEmitter<SolutionNode | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -7050,9 +7076,13 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
     watcher.onDidDelete(() => solutionExplorerProvider?.refresh());
     watcher.onDidChange(() => solutionExplorerProvider?.refresh());
 
+    const decorationProvider = new SolutionExplorerDecorationProvider();
+
     context.subscriptions.push(
         treeView,
         watcher,
+        vscode.window.registerFileDecorationProvider(decorationProvider),
+        vscode.languages.onDidChangeDiagnostics(() => decorationProvider.notifyChanged()),
 
         vscode.workspace.onDidChangeWorkspaceFolders(() => solutionExplorerProvider?.refresh()),
 
@@ -7099,7 +7129,7 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
         const conn = findConnection(folder.uri.fsPath);
         if (!conn) { item.hide(); return; }
         item.text = `$(database) ${conn.label}`;
-        item.tooltip = `OpenBase — ${conn.type} · Clique para abrir o SQL Runner`;
+        item.tooltip = undefined;
         item.show();
     }
 
@@ -7118,15 +7148,14 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         exec('openbase version show', { env }, (err, stdout) => {
             if (err) {
-                cliItem.text = '$(warning) OpenBase CLI';
-                cliItem.tooltip = 'OpenBase CLI não encontrado — clique para instalar';
+                cliItem.text = '$(warning) OpenBase (não instalado)';
+                cliItem.tooltip = undefined;
                 cliItem.command = 'openbase.update';
                 cliItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             } else {
-                const ver = stdout.trim();
-                cliItem.text = `$(tools) OpenBase ${ver}`;
-                cliItem.tooltip = `OpenBase CLI ${ver} instalado · Clique para ver detalhes`;
-                cliItem.command = 'openbase.version';
+                cliItem.text = `$(tools) OpenBase ${stdout.trim()}`;
+                cliItem.tooltip = undefined;
+                cliItem.command = undefined;
                 cliItem.backgroundColor = undefined;
             }
             cliItem.show();
