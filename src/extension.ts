@@ -3621,6 +3621,29 @@ interface ErTableData {
     fks: { toSchema: string; toTable: string }[];
 }
 
+function tableToPascalCase(name: string): string {
+    if (/[_\-]/.test(name)) {
+        return name.split(/[_\-]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+    }
+    return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+async function detectScaffoldEntity(cwd: string, table: string): Promise<string | undefined> {
+    const escaped = table.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return new Promise<string | undefined>(resolve => {
+        exec(
+            `find "${cwd}/src" -name "*Configuration.cs" -not -path "*/obj/*" -exec grep -l 'ToTable("${escaped}")' {} + 2>/dev/null`,
+            { timeout: 5000 },
+            (_err, out) => {
+                const file = out.trim().split('\n')[0];
+                if (!file) { resolve(undefined); return; }
+                const m = path.basename(file).match(/^(.+)Configuration\.cs$/);
+                resolve(m ? m[1] : undefined);
+            },
+        );
+    });
+}
+
 async function loadTableDetails(
     conn: DbConnection,
     schema: string,
@@ -3735,6 +3758,8 @@ function buildTableInspectorHtml(
     dbType: DbTemplate,
     columns: TableColumn[],
     constraints: TableConstraint[],
+    entityName: string,
+    hasScaffold: boolean,
 ): string {
     const esc = (s: string) => String(s)
         .replace(/&/g, '&amp;')
@@ -3807,6 +3832,8 @@ body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',-apple-system,sans-
 .db-badge{background:#1a1040;border:1px solid rgba(180,79,255,0.35);color:#b44fff;font-size:10px;padding:2px 9px;border-radius:10px;white-space:nowrap;flex-shrink:0}
 .btn-sel{background:linear-gradient(135deg,#b44fff,#ff3fa4);color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap;flex-shrink:0}
 .btn-sel:hover{opacity:.82}
+.btn-scaffold{background:rgba(180,79,255,.12);color:#b44fff;border:1px solid rgba(180,79,255,.4);padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap;flex-shrink:0}
+.btn-scaffold:hover{background:rgba(180,79,255,.22);border-color:#b44fff}
 .stats{font-size:11px;color:#444;margin-top:8px}
 .section{padding:0 20px 28px}
 .section-title{font-size:10px;font-weight:700;letter-spacing:1.2px;color:#b44fff;text-transform:uppercase;padding:18px 0 10px;border-bottom:1px solid rgba(180,79,255,0.15)}
@@ -3841,6 +3868,7 @@ tr:hover td{background:rgba(180,79,255,0.05)}
       <div class="tbl-schema">${esc(schema)}</div>
     </div>
     <span class="db-badge">${esc(dbLabel[dbType])}</span>
+    <button class="btn-scaffold" id="btn-scaffold" data-cmd="${hasScaffold ? 'scaffoldUpdate' : 'scaffold'}" data-entity="${esc(entityName)}">${hasScaffold ? '&#x21BB;&nbsp;Update Scaffold' : '+&nbsp;Scaffold'}</button>
     <button class="btn-sel" id="btn-sel">&#x25B6;&nbsp;SELECT</button>
   </div>
   <div class="stats">${stats}</div>
@@ -3857,6 +3885,10 @@ ${conSection}
 const vscode = acquireVsCodeApi();
 document.getElementById('btn-sel').addEventListener('click', function() {
     vscode.postMessage({ command: 'runSelect' });
+});
+var scaffoldBtn = document.getElementById('btn-scaffold');
+scaffoldBtn.addEventListener('click', function() {
+    vscode.postMessage({ command: scaffoldBtn.dataset.cmd, entity: scaffoldBtn.dataset.entity });
 });
 </script>
 </body>
@@ -4577,24 +4609,82 @@ async function openTableInspector(
     );
 
     tableInspectorPanels.set(key, panel);
-    panel.onDidDispose(() => tableInspectorPanels.delete(key));
+
+    let scaffoldWatcher: vscode.FileSystemWatcher | undefined;
+    panel.onDidDispose(() => {
+        scaffoldWatcher?.dispose();
+        tableInspectorPanels.delete(key);
+    });
 
     panel.webview.html = buildTableInspectorLoadingHtml(nonce, panel.webview.cspSource, schema, table);
 
-    panel.webview.onDidReceiveMessage(async (msg: { command: string }) => {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    panel.webview.onDidReceiveMessage(async (msg: { command: string; entity?: string }) => {
         if (msg.command === 'runSelect') {
             const sql = buildSelectQuery(schema, table, dbType);
             await openScriptInSqlRunner('', sql);
+            return;
+        }
+        if (msg.command === 'scaffold' || msg.command === 'scaffoldUpdate') {
+            if (!cwd) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
+            const isUpdate = msg.command === 'scaffoldUpdate';
+            const inputEntity = await vscode.window.showInputBox({
+                title: isUpdate ? 'OpenBase: Update Scaffold' : 'OpenBase: Scaffold',
+                prompt: 'Entity name (PascalCase)',
+                value: msg.entity ?? '',
+                validateInput: v => (!v?.trim() ? 'Entity name is required' : !/^[A-Z][a-zA-Z0-9]*$/.test(v.trim()) ? 'Must be PascalCase (e.g. Product)' : undefined),
+            });
+            if (!inputEntity) return;
+            const args = [`-e ${inputEntity}`, `--schema "${schema}"`, `--table "${table}"`];
+            if (isUpdate) args.push('--update');
+            else args.push('--mode modelfirst');
+            openTerminal(isUpdate ? 'Scaffold Update' : 'Scaffold', cwd, `openbase scaffold ${args.join(' ')}`);
         }
     });
 
-    try {
+    const renderPanel = async (hasScaffold: boolean, entityName: string) => {
         const details = await loadTableDetails(conn, schema, table);
         panel.webview.html = buildTableInspectorHtml(
             nonce, panel.webview.cspSource,
             schema, table, dbType,
             details.columns, details.constraints,
+            entityName, hasScaffold,
         );
+    };
+
+    try {
+        const [details, scaffoldEntity] = await Promise.all([
+            loadTableDetails(conn, schema, table),
+            cwd ? detectScaffoldEntity(cwd, table) : Promise.resolve(undefined),
+        ]);
+        const entityName = scaffoldEntity ?? tableToPascalCase(table);
+        const hasScaffold = scaffoldEntity !== undefined;
+        panel.webview.html = buildTableInspectorHtml(
+            nonce, panel.webview.cspSource,
+            schema, table, dbType,
+            details.columns, details.constraints,
+            entityName, hasScaffold,
+        );
+
+        if (!hasScaffold && cwd) {
+            scaffoldWatcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(vscode.Uri.file(cwd), 'src/**/Configurations/*Configuration.cs'),
+            );
+            const checkAndFlip = async (uri: vscode.Uri) => {
+                try {
+                    const bytes = await vscode.workspace.fs.readFile(uri);
+                    if (!Buffer.from(bytes).toString('utf-8').includes(`ToTable("${table}")`)) return;
+                    const m = path.basename(uri.fsPath).match(/^(.+)Configuration\.cs$/);
+                    if (!m) return;
+                    scaffoldWatcher?.dispose();
+                    scaffoldWatcher = undefined;
+                    await renderPanel(true, m[1]);
+                } catch { /* ignore */ }
+            };
+            scaffoldWatcher.onDidCreate(checkAndFlip);
+            scaffoldWatcher.onDidChange(checkAndFlip);
+        }
     } catch (e) {
         panel.webview.html = buildTableInspectorErrorHtml(
             nonce, panel.webview.cspSource,
