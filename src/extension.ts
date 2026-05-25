@@ -2574,22 +2574,22 @@ function detectApiUrl(cwd: string): string {
 let httpPanel: vscode.WebviewPanel | undefined;
 
 function ensureLocalEnv(baseUrl: string): void {
-    if (!baseUrl) return;
     const dir = getEnvsDir();
     if (!dir) return;
+    const url = baseUrl || 'https://localhost:5000';
     const localFile = path.join(dir, 'local.json');
     if (fs.existsSync(localFile)) {
         try {
             const existing = JSON.parse(fs.readFileSync(localFile, 'utf-8')) as HttpEnvFile;
-            if (existing.variables?.LOCAL_URL === baseUrl) return;
-            existing.variables = { ...existing.variables, LOCAL_URL: baseUrl };
+            if (existing.variables?.LOCAL_URL === url) return;
+            existing.variables = { ...existing.variables, LOCAL_URL: url };
             fs.writeFileSync(localFile, JSON.stringify(existing, null, 2), 'utf-8');
         } catch {}
         return;
     }
     try {
         fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(localFile, JSON.stringify({ name: 'Local', variables: { LOCAL_URL: baseUrl } }, null, 2), 'utf-8');
+        fs.writeFileSync(localFile, JSON.stringify({ name: 'Local', variables: { LOCAL_URL: url } }, null, 2), 'utf-8');
         const active = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
         if (!active) extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, 'local.json');
     } catch {}
@@ -2602,6 +2602,9 @@ async function httpRunner(): Promise<void> {
 
     if (httpPanel) {
         httpPanel.reveal(vscode.ViewColumn.One);
+        const envs = loadEnvFiles();
+        const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        httpPanel.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
         return;
     }
 
