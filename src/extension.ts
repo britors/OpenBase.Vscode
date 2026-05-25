@@ -7291,6 +7291,12 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
             }
         }),
 
+        vscode.commands.registerCommand('openbase.solutionExplorer.test', () => {
+            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
+            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
+            openTerminal('Run Tests', cwd, `dotnet test ${target}`);
+        }),
+
         vscode.commands.registerCommand('openbase.solutionExplorer.publish',
             () => sePublishProject(cwd)),
 
