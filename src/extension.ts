@@ -7109,6 +7109,31 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
     );
 
     refresh();
+
+    const cliItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+    context.subscriptions.push(cliItem);
+
+    function refreshCli(): void {
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        exec('openbase version show', { env }, (err, stdout) => {
+            if (err) {
+                cliItem.text = '$(warning) OpenBase CLI';
+                cliItem.tooltip = 'OpenBase CLI não encontrado — clique para instalar';
+                cliItem.command = 'openbase.update';
+                cliItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            } else {
+                const ver = stdout.trim();
+                cliItem.text = `$(tools) OpenBase ${ver}`;
+                cliItem.tooltip = `OpenBase CLI ${ver} instalado · Clique para ver detalhes`;
+                cliItem.command = 'openbase.version';
+                cliItem.backgroundColor = undefined;
+            }
+            cliItem.show();
+        });
+    }
+
+    refreshCli();
 }
 
 // ─── activate ────────────────────────────────────────────────────────────────
