@@ -7089,6 +7089,12 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.solutionExplorer.refresh',
             () => solutionExplorerProvider?.refresh()),
 
+        vscode.commands.registerCommand('openbase.solutionExplorer.buildAll', () => {
+            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
+            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
+            openTerminal('Build Solution', cwd, `dotnet build ${target}`);
+        }),
+
         vscode.commands.registerCommand('openbase.solutionExplorer.build',
             (item: SolutionNode) => {
                 if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
