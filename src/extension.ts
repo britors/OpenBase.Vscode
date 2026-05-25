@@ -85,6 +85,8 @@ let extContext: vscode.ExtensionContext | undefined;
 async function newProject(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
 
+    const prefs = extContext?.globalState.get<Record<string, string>>(NEW_PROJECT_PREFS_KEY) ?? {};
+
     const projectName = await vscode.window.showInputBox({
         title: 'OpenBase: New Project (1/8) — Project name',
         prompt: 'Project name (PascalCase, no spaces)',
@@ -105,11 +107,11 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     );
     if (!template) return;
 
-    const dbServerDefault = template.label === 'sqlserver' ? '.' : 'localhost';
+    const dbServerDefault = prefs.dbServer ?? (template.label === 'sqlserver' ? '.' : 'localhost');
     const dbServer = await vscode.window.showInputBox({
         title: 'OpenBase: New Project (3/8) — Database server',
         prompt: 'Database server address (leave empty for default)',
-        placeHolder: dbServerDefault,
+        placeHolder: template.label === 'sqlserver' ? '.' : 'localhost',
         value: dbServerDefault,
     });
     if (dbServer === undefined) return;
@@ -128,6 +130,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
             ? 'Database user (leave empty for Windows Authentication)'
             : 'Database user',
         placeHolder: template.label === 'sqlserver' ? 'Windows Auth' : 'postgres',
+        value: prefs.dbUser ?? '',
     });
     if (dbUser === undefined) return;
 
@@ -144,6 +147,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         title: 'OpenBase: New Project (7/8) — MediatR license',
         prompt: 'MediatR commercial license key (leave empty if none)',
         placeHolder: 'Leave empty if not applicable',
+        value: prefs.mediatrLicense ?? '',
     });
     if (mediatrLicense === undefined) return;
 
@@ -151,6 +155,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         title: 'OpenBase: New Project (8/8) — AutoMapper license',
         prompt: 'AutoMapper commercial license key (leave empty if none)',
         placeHolder: 'Leave empty if not applicable',
+        value: prefs.automapperLicense ?? '',
     });
     if (automapperLicense === undefined) return;
 
@@ -183,6 +188,14 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         vscode.window.showErrorMessage(`Failed to create project "${projectName}". Check the output for details.`);
         return;
     }
+
+    await extContext?.globalState.update(NEW_PROJECT_PREFS_KEY, {
+        template: template.label,
+        dbServer: dbServer.trim(),
+        dbUser: dbUser.trim(),
+        mediatrLicense: mediatrLicense.trim(),
+        automapperLicense: automapperLicense.trim(),
+    });
 
     const projectUri = vscode.Uri.file(path.join(cwd, projectName));
     const action = await vscode.window.showInformationMessage(
@@ -567,7 +580,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         this._view = view;
         view.webview.options = { enableScripts: true };
         view.webview.html = this._html();
-        view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
+        view.webview.onDidReceiveMessage(async (msg) => {
+            if (msg.command === 'ready') {
+                const prefs = extContext?.globalState.get<Record<string, string>>(NEW_PROJECT_PREFS_KEY) ?? {};
+                view.webview.postMessage({ command: 'loadNewProjectPrefs', prefs });
+                return;
+            }
+            this._handle(msg, view);
+        });
     }
 
     postNavigateTo(tab: string, query: string): void {
@@ -629,6 +649,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
         const ok = await this._exec(`openbase new ${args.join(' ')}`, cwd, view, 'new', 'OpenBase: New Project');
         if (!ok) return;
+
+        await extContext?.globalState.update(NEW_PROJECT_PREFS_KEY, {
+            template: d.template,
+            dbServer: d.dbServer,
+            dbUser: d.dbUser,
+            mediatrLicense: d.mediatrLicense,
+            automapperLicense: d.automapperLicense,
+        });
 
         const projectUri = vscode.Uri.file(path.join(cwd, d.name));
         const action = await vscode.window.showInformationMessage(`Project "${d.name}" created successfully!`, 'Open Folder', 'Open in New Window');
@@ -863,8 +891,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div class="field"><label>DB User</label><input id="new-usr" type="text" placeholder="Windows Auth / postgres"></div>
     <div class="field"><label>DB Password</label><input id="new-pwd" type="password"></div>
     <hr>
-    <div class="field"><label>MediatR License</label><input id="new-mediatR" type="text" placeholder="(optional)"></div>
-    <div class="field"><label>AutoMapper License</label><input id="new-automapper" type="text" placeholder="(optional)"></div>
+    <div class="field"><label>MediatR License</label><textarea id="new-mediatR" rows="3" placeholder="(optional)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);padding:4px 6px"></textarea></div>
+    <div class="field"><label>AutoMapper License</label><textarea id="new-automapper" rows="3" placeholder="(optional)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);padding:4px 6px"></textarea></div>
     <hr>
     <div class="field"><label>Destination folder</label>
       <div class="row">
@@ -1104,7 +1132,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
-      if (m.command === 'folderPicked') {
+      if (m.command === 'loadNewProjectPrefs') {
+        var p = m.prefs || {};
+        if (p.template) document.getElementById('new-tpl').value = p.template;
+        if (p.dbServer)  document.getElementById('new-srv').value = p.dbServer;
+        if (p.dbUser)    document.getElementById('new-usr').value = p.dbUser;
+        if (p.mediatrLicense)    document.getElementById('new-mediatR').value = p.mediatrLicense;
+        if (p.automapperLicense) document.getElementById('new-automapper').value = p.automapperLicense;
+      } else if (m.command === 'folderPicked') {
         document.getElementById('new-folder').value = m.path;
       } else if (m.command === 'done') {
         loading(m.ctx, false);
@@ -1424,6 +1459,7 @@ function getNonce(): string {
     return text;
 }
 
+const NEW_PROJECT_PREFS_KEY = 'newProjectPrefs';
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
 const HTTP_HISTORY_KEY = 'httpCallHistory';
@@ -1914,6 +1950,14 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .explain-tree{padding:12px;overflow:auto;flex:1}
   .explain-node{margin-left:14px;border-left:2px solid rgba(180,79,255,.2);padding-left:10px;margin-top:6px}
   .explain-root{margin-left:0!important;border-left:none!important;padding-left:0!important;margin-top:0!important}
+  #result-tabs{display:flex;flex-shrink:0;border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);overflow-x:auto;overflow-y:hidden;min-height:28px}
+  .result-tab{display:flex;align-items:center;gap:5px;padding:3px 10px;cursor:pointer;font-size:11px;border-right:1px solid var(--ob-border);white-space:nowrap;user-select:none;color:var(--ob-dim);border-top:2px solid transparent}
+  .result-tab.active{color:var(--ob-text);background:var(--ob-bg0);border-top-color:var(--ob-purple)}
+  .result-tab:hover:not(.active){background:rgba(180,79,255,.07)}
+  .result-tab-label{max-width:160px;overflow:hidden;text-overflow:ellipsis}
+  .result-tab-close{opacity:0;font-size:10px;line-height:1;padding:1px 3px;border-radius:2px;flex-shrink:0}
+  .result-tab-close:hover{background:rgba(255,63,164,.25);opacity:1!important;color:var(--ob-pink)}
+  .result-tab:hover .result-tab-close{opacity:.5}
   .node-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:3px 0}
   .node-op{font-weight:600;font-size:12px;color:var(--ob-text)}
   .node-detail{font-size:11px;color:var(--ob-dim);font-style:italic}
@@ -1943,6 +1987,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
+<div id="result-tabs" class="hidden"></div>
 <div id="results" class="results">
   <p class="placeholder">Write a query above and press Run or F8</p>
 </div>
@@ -1977,6 +2022,10 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   var historyEntries = [];
   var historyVisible = false;
   var activePanel = 'results'; // 'results' | 'history' | 'explain'
+  var resultTabs = [];
+  var activeTabId = null;
+  var tabCounter = 0;
+  var lastRunSql = '';
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -2031,6 +2080,12 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   });
   document.getElementById('back-from-explain-btn').addEventListener('click', function() {
     showPanel('results');
+  });
+  document.getElementById('result-tabs').addEventListener('click', function(e) {
+    var closeBtn = e.target.closest('[data-close-id]');
+    if (closeBtn) { closeTab(parseInt(closeBtn.getAttribute('data-close-id'), 10)); return; }
+    var tabEl = e.target.closest('[data-tab-id]');
+    if (tabEl) activateTab(parseInt(tabEl.getAttribute('data-tab-id'), 10));
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
@@ -2165,6 +2220,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
       return;
     }
+    lastRunSql = sql;
     running = true;
     t0 = Date.now();
     document.getElementById('run-btn').classList.add('hidden');
@@ -2263,18 +2319,75 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 
   function renderResult(columns, rows, message, elapsed) {
     setStatus('');
-    lastColumns = columns || [];
-    lastRows = rows || [];
     if (!columns || !columns.length) {
-      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML =
+        '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
+      return;
+    }
+    tabCounter++;
+    var firstLine = lastRunSql.trim().split('\\n')[0].trim();
+    var label = '#' + tabCounter + ' ' + (firstLine.length > 24 ? firstLine.slice(0, 23) + '…' : firstLine);
+    var tab = { id: tabCounter, label: label, columns: columns || [], rows: rows || [], message: message, elapsed: elapsed };
+    resultTabs.push(tab);
+    if (resultTabs.length > 10) resultTabs.shift();
+    activateTab(tab.id);
+    showPanel('results');
+  }
+
+  function activateTab(id) {
+    var tab = null;
+    for (var i = 0; i < resultTabs.length; i++) { if (resultTabs[i].id === id) { tab = resultTabs[i]; break; } }
+    if (!tab) return;
+    activeTabId = id;
+    lastColumns = tab.columns;
+    lastRows = tab.rows;
+    renderTabBar();
+    renderResultContent(tab.columns, tab.rows, tab.message, tab.elapsed);
+  }
+
+  function closeTab(id) {
+    var idx = -1;
+    for (var i = 0; i < resultTabs.length; i++) { if (resultTabs[i].id === id) { idx = i; break; } }
+    if (idx === -1) return;
+    resultTabs.splice(idx, 1);
+    if (activeTabId === id) {
+      if (resultTabs.length > 0) {
+        activateTab(resultTabs[Math.min(idx, resultTabs.length - 1)].id);
+      } else {
+        activeTabId = null; lastColumns = []; lastRows = [];
+        document.getElementById('results').innerHTML = '<p class="placeholder">Write a query above and press Run or F8</p>';
+        renderTabBar();
+      }
+    } else {
+      renderTabBar();
+    }
+  }
+
+  function renderTabBar() {
+    var bar = document.getElementById('result-tabs');
+    if (!resultTabs.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    bar.classList.remove('hidden');
+    var html = '';
+    for (var i = 0; i < resultTabs.length; i++) {
+      var t = resultTabs[i];
+      html += '<div class="result-tab' + (t.id === activeTabId ? ' active' : '') + '" data-tab-id="' + t.id + '">'
+            + '<span class="result-tab-label" title="' + esc(t.label) + '">' + esc(t.label) + '</span>'
+            + '<span class="result-tab-close" data-close-id="' + t.id + '">✕</span>'
+            + '</div>';
+    }
+    bar.innerHTML = html;
+  }
+
+  function renderResultContent(columns, rows, message, elapsed) {
+    if (!columns || !columns.length) {
       document.getElementById('results').innerHTML =
         '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
       return;
     }
     var rowCount = rows ? rows.length : 0;
-    var infoMsg = message ? ' · ' + esc(message) : '';
+    var infoMsg = message ? ' \xB7 ' + esc(message) : '';
     var hdr = '<div class="result-header">'
-            + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' · ' + elapsed + infoMsg + '</span>'
+            + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' \xB7 ' + elapsed + infoMsg + '</span>'
             + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
             + '</div>';
     var tbl = '<table><thead><tr>';
@@ -2301,7 +2414,9 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 
   function showPanel(which) {
     activePanel = which;
-    document.getElementById('results').classList.toggle('hidden', which !== 'results');
+    var showResults = which === 'results';
+    document.getElementById('result-tabs').classList.toggle('hidden', !showResults || !resultTabs.length);
+    document.getElementById('results').classList.toggle('hidden', !showResults);
     document.getElementById('history-panel').classList.toggle('hidden', which !== 'history');
     document.getElementById('explain-panel').classList.toggle('hidden', which !== 'explain');
     historyVisible = (which === 'history');
@@ -2458,12 +2573,38 @@ function detectApiUrl(cwd: string): string {
 
 let httpPanel: vscode.WebviewPanel | undefined;
 
+function ensureLocalEnv(baseUrl: string): void {
+    const dir = getEnvsDir();
+    if (!dir) return;
+    const url = baseUrl || 'https://localhost:5000';
+    const localFile = path.join(dir, 'local.json');
+    if (fs.existsSync(localFile)) {
+        try {
+            const existing = JSON.parse(fs.readFileSync(localFile, 'utf-8')) as HttpEnvFile;
+            if (existing.variables?.LOCAL_URL === url) return;
+            existing.variables = { ...existing.variables, LOCAL_URL: url };
+            fs.writeFileSync(localFile, JSON.stringify(existing, null, 2), 'utf-8');
+        } catch {}
+        return;
+    }
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(localFile, JSON.stringify({ name: 'Local', variables: { LOCAL_URL: url } }, null, 2), 'utf-8');
+        const active = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        if (!active) extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, 'local.json');
+    } catch {}
+}
+
 async function httpRunner(): Promise<void> {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const baseUrl = cwd ? detectApiUrl(cwd) : '';
+    ensureLocalEnv(baseUrl);
 
     if (httpPanel) {
         httpPanel.reveal(vscode.ViewColumn.One);
+        const envs = loadEnvFiles();
+        const activeFilename = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        httpPanel.webview.postMessage({ command: 'loadEnvs', envs, activeFilename });
         return;
     }
 
@@ -6811,7 +6952,7 @@ function setupEndpointsMap(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.endpointsMap.open', async (item: EndpointItem) => {
             if (!(item instanceof EndpointItem)) return;
             const { method, route } = item.endpoint;
-            const data: HttpRequestData = { method: method.toUpperCase(), url: route };
+            const data: HttpRequestData = { method: method.toUpperCase(), url: '{{LOCAL_URL}}' + route };
             if (httpPanel) {
                 httpPanel.reveal(vscode.ViewColumn.One);
                 httpPanel.webview.postMessage({ command: 'loadRequest', ...data });
@@ -6975,6 +7116,32 @@ function seWalkDir(dir: string): SolutionNode[] {
 
 let solutionExplorerProvider: SolutionExplorerProvider | undefined;
 
+class SolutionExplorerDecorationProvider implements vscode.FileDecorationProvider {
+    private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<undefined>();
+    readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+
+    notifyChanged(): void { this._onDidChangeFileDecorations.fire(undefined); }
+
+    provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+        if (!uri.fsPath.endsWith('.csproj')) return undefined;
+
+        const projDir = path.dirname(uri.fsPath) + path.sep;
+        let errorCount = 0;
+        for (const [fileUri, diags] of vscode.languages.getDiagnostics()) {
+            if (!fileUri.fsPath.startsWith(projDir)) continue;
+            errorCount += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+        }
+
+        if (errorCount === 0) return undefined;
+
+        return {
+            badge: errorCount >= 100 ? '!!' : String(errorCount),
+            tooltip: `${errorCount} erro${errorCount !== 1 ? 's' : ''} de build`,
+            color: new vscode.ThemeColor('list.errorForeground'),
+        };
+    }
+}
+
 class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> {
     private _onDidChangeTreeData = new vscode.EventEmitter<SolutionNode | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -7034,6 +7201,158 @@ class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> 
     }
 }
 
+function seReadLaunchUrl(projDir: string): string | undefined {
+    try {
+        const raw = fs.readFileSync(path.join(projDir, 'Properties', 'launchSettings.json'), 'utf-8');
+        const json = JSON.parse(raw);
+        for (const profile of Object.values(json?.profiles ?? {}) as Record<string, string>[]) {
+            if (profile.applicationUrl) {
+                const urls = profile.applicationUrl.split(';');
+                return urls.find(u => u.startsWith('https')) ?? urls[0];
+            }
+        }
+    } catch {}
+    return undefined;
+}
+
+function writePubxml(profilesDir: string, name: string, content: string): void {
+    fs.mkdirSync(profilesDir, { recursive: true });
+    fs.writeFileSync(path.join(profilesDir, `${name}.pubxml`), content, 'utf-8');
+}
+
+async function sePublishProject(cwd: string): Promise<void> {
+    const proj = findEntryProject(cwd);
+    if (!proj) { vscode.window.showErrorMessage('Nenhum projeto encontrado para publicar.'); return; }
+
+    const projDir   = path.dirname(proj.csprojPath);
+    const profilesDir = path.join(projDir, 'Properties', 'PublishProfiles');
+
+    let existing: string[] = [];
+    try { existing = fs.readdirSync(profilesDir).filter(f => f.endsWith('.pubxml')).map(f => path.basename(f, '.pubxml')); } catch {}
+
+    const items: vscode.QuickPickItem[] = [
+        ...existing.map(p => ({ label: p, description: 'perfil salvo', iconPath: new vscode.ThemeIcon('file-code') })),
+        ...(existing.length ? [{ label: '', kind: vscode.QuickPickItemKind.Separator }] : []),
+        { label: '$(folder)  Pasta local',       description: 'Publicar em uma pasta local' },
+        { label: '$(globe)   FTP',                description: 'Publicar via FTP' },
+        { label: '$(server)  Web Deploy (IIS)',   description: 'Publicar via Web Deploy no IIS' },
+    ];
+
+    const picked = await vscode.window.showQuickPick(items, { title: 'OpenBase: Publicar — Destino' });
+    if (!picked || picked.kind === vscode.QuickPickItemKind.Separator) return;
+
+    if (existing.includes(picked.label)) {
+        openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${picked.label}"`);
+        return;
+    }
+
+    if (picked.label.includes('Pasta local'))    { await sePublishLocal(proj, projDir, profilesDir); return; }
+    if (picked.label.includes('FTP'))            { await sePublishFtp(proj, projDir, profilesDir);   return; }
+    if (picked.label.includes('Web Deploy'))     { await sePublishWebDeploy(proj, projDir, profilesDir); }
+}
+
+async function sePublishLocal(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Publicar Local (1/2) — Nome do perfil', value: 'FolderPublish' });
+    if (!name) return;
+
+    const outPath = await vscode.window.showInputBox({
+        title: 'Publicar Local (2/2) — Pasta de saída',
+        value: path.join(projDir, 'bin', 'publish'),
+    });
+    if (outPath === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <DeleteExistingFiles>true</DeleteExistingFiles>
+    <LaunchSiteAfterPublish>True</LaunchSiteAfterPublish>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <PublishProvider>FileSystem</PublishProvider>
+    <PublishUrl>${outPath}</PublishUrl>
+    <WebPublishMethod>FileSystem</WebPublishMethod>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}"`);
+}
+
+async function sePublishFtp(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Publicar FTP (1/5) — Nome do perfil', value: 'FtpPublish' });
+    if (!name) return;
+    const host = await vscode.window.showInputBox({ title: 'Publicar FTP (2/5) — Servidor', placeHolder: 'ftp.exemplo.com' });
+    if (!host) return;
+    const remotePath = await vscode.window.showInputBox({ title: 'Publicar FTP (3/5) — Caminho remoto', value: '/' });
+    if (remotePath === undefined) return;
+    const user = await vscode.window.showInputBox({ title: 'Publicar FTP (4/5) — Usuário' });
+    if (user === undefined) return;
+    const password = await vscode.window.showInputBox({ title: 'Publicar FTP (5/5) — Senha', password: true });
+    if (password === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <WebPublishMethod>FTP</WebPublishMethod>
+    <PublishProtocol>FTP</PublishProtocol>
+    <PublishUrl>ftp://${host}${remotePath.startsWith('/') ? remotePath : '/' + remotePath}</PublishUrl>
+    <UserName>${user}</UserName>
+    <FTPPassiveMode>True</FTPPassiveMode>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish FTP', projDir,
+        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
+}
+
+async function sePublishWebDeploy(
+    proj: NonNullable<ReturnType<typeof findEntryProject>>,
+    projDir: string,
+    profilesDir: string,
+): Promise<void> {
+    const name = await vscode.window.showInputBox({ title: 'Web Deploy (1/5) — Nome do perfil', value: 'WebDeployPublish' });
+    if (!name) return;
+    const serverUrl = await vscode.window.showInputBox({ title: 'Web Deploy (2/5) — URL do servidor', placeHolder: 'https://meuservidor.com:8172' });
+    if (!serverUrl) return;
+    const sitePath = await vscode.window.showInputBox({ title: 'Web Deploy (3/5) — Caminho IIS', placeHolder: 'Default Web Site/meuapp', value: 'Default Web Site' });
+    if (sitePath === undefined) return;
+    const user = await vscode.window.showInputBox({ title: 'Web Deploy (4/5) — Usuário' });
+    if (user === undefined) return;
+    const password = await vscode.window.showInputBox({ title: 'Web Deploy (5/5) — Senha', password: true });
+    if (password === undefined) return;
+
+    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <WebPublishMethod>MSDeploy</WebPublishMethod>
+    <PublishProtocol>MSDeploy</PublishProtocol>
+    <MSDeployServiceURL>${serverUrl}</MSDeployServiceURL>
+    <DeployIisAppPath>${sitePath}</DeployIisAppPath>
+    <SkipExtraFilesOnServer>True</SkipExtraFilesOnServer>
+    <MSDeployPublishMethod>RemoteAgent</MSDeployPublishMethod>
+    <EnableMSDeployBackup>True</EnableMSDeployBackup>
+    <UserName>${user}</UserName>
+    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
+    <TargetFramework>${proj.targetFramework}</TargetFramework>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+</Project>`);
+
+    openTerminal('Publish Web Deploy', projDir,
+        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
+}
+
 function setupSolutionExplorer(context: vscode.ExtensionContext): void {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!cwd) return;
@@ -7050,14 +7369,77 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
     watcher.onDidDelete(() => solutionExplorerProvider?.refresh());
     watcher.onDidChange(() => solutionExplorerProvider?.refresh());
 
+    const decorationProvider = new SolutionExplorerDecorationProvider();
+
     context.subscriptions.push(
         treeView,
         watcher,
+        vscode.window.registerFileDecorationProvider(decorationProvider),
+        vscode.languages.onDidChangeDiagnostics(() => decorationProvider.notifyChanged()),
 
         vscode.workspace.onDidChangeWorkspaceFolders(() => solutionExplorerProvider?.refresh()),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.refresh',
             () => solutionExplorerProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.buildAll', () => {
+            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
+            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
+            openTerminal('Build Solution', cwd, `dotnet build ${target}`);
+        }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.runAll', () => {
+            const proj = findEntryProject(cwd);
+            const target = proj ? `"${proj.csprojPath}"` : '.';
+            openTerminal('Run Solution', cwd, `dotnet run --project ${target}`);
+        }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.debug', async () => {
+            const folder = vscode.workspace.workspaceFolders?.[0];
+            if (!folder) return;
+
+            const serverReadyAction = {
+                action: 'openExternally',
+                pattern: '\\bNow listening on:\\s+(https?://\\S+)',
+            };
+
+            const launchConfigs: vscode.DebugConfiguration[] | undefined =
+                vscode.workspace.getConfiguration('launch', folder.uri).get('configurations');
+
+            if (launchConfigs && launchConfigs.length > 0) {
+                const config = { ...launchConfigs[0] };
+                if (!config.serverReadyAction) config.serverReadyAction = serverReadyAction;
+                await vscode.debug.startDebugging(folder, config);
+            } else {
+                const proj = findEntryProject(cwd);
+                if (!proj) {
+                    vscode.window.showErrorMessage('Nenhum projeto encontrado para depurar.');
+                    return;
+                }
+                const projDir = path.dirname(proj.csprojPath);
+                const config: vscode.DebugConfiguration = {
+                    name: proj.assemblyName,
+                    type: 'coreclr',
+                    request: 'launch',
+                    program: path.join(projDir, 'bin', 'Debug', proj.targetFramework, `${proj.assemblyName}.dll`),
+                    args: [],
+                    cwd: projDir,
+                    stopAtEntry: false,
+                    env: { ASPNETCORE_ENVIRONMENT: 'Development' },
+                    serverReadyAction,
+                };
+                await vscode.debug.startDebugging(folder, config);
+            }
+        }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.test', () => {
+            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
+            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
+            openTerminal('Run Tests', cwd, `dotnet test ${target}`);
+        }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.publish',
+            () => sePublishProject(cwd)),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.build',
             (item: SolutionNode) => {
@@ -7099,7 +7481,7 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
         const conn = findConnection(folder.uri.fsPath);
         if (!conn) { item.hide(); return; }
         item.text = `$(database) ${conn.label}`;
-        item.tooltip = `OpenBase — ${conn.type} · Clique para abrir o SQL Runner`;
+        item.tooltip = undefined;
         item.show();
     }
 

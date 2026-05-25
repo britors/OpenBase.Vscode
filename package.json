@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.5.1",
+  "version": "10.6.5",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -420,6 +420,24 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "openbase.solutionExplorer.buildAll",
+        "title": "Build Solution",
+        "category": "OpenBase",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "openbase.solutionExplorer.runAll",
+        "title": "Run Solution",
+        "category": "OpenBase",
+        "icon": "$(run)"
+      },
+      {
+        "command": "openbase.solutionExplorer.debug",
+        "title": "Start Debugging",
+        "category": "OpenBase",
+        "icon": "$(debug-alt)"
+      },
+      {
         "command": "openbase.solutionExplorer.collapseAll",
         "title": "Collapse All",
         "category": "OpenBase",
@@ -442,6 +460,18 @@
         "title": "Open in Terminal",
         "category": "OpenBase",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "openbase.solutionExplorer.test",
+        "title": "Run Tests",
+        "category": "OpenBase",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "openbase.solutionExplorer.publish",
+        "title": "Publish",
+        "category": "OpenBase",
+        "icon": "$(cloud-upload)"
       }
     ],
     "keybindings": [
@@ -576,9 +606,29 @@
           "group": "navigation@3"
         },
         {
+          "command": "openbase.solutionExplorer.buildAll",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "openbase.solutionExplorer.debug",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "openbase.solutionExplorer.test",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "openbase.solutionExplorer.publish",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@4"
+        },
+        {
           "command": "openbase.solutionExplorer.refresh",
           "when": "view == openbase.solutionexplorer.tree",
-          "group": "navigation"
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
