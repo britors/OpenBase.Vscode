@@ -85,6 +85,8 @@ let extContext: vscode.ExtensionContext | undefined;
 async function newProject(uri?: vscode.Uri): Promise<void> {
     if (!await guardInstalled()) return;
 
+    const prefs = extContext?.globalState.get<Record<string, string>>(NEW_PROJECT_PREFS_KEY) ?? {};
+
     const projectName = await vscode.window.showInputBox({
         title: 'OpenBase: New Project (1/8) — Project name',
         prompt: 'Project name (PascalCase, no spaces)',
@@ -105,11 +107,11 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
     );
     if (!template) return;
 
-    const dbServerDefault = template.label === 'sqlserver' ? '.' : 'localhost';
+    const dbServerDefault = prefs.dbServer ?? (template.label === 'sqlserver' ? '.' : 'localhost');
     const dbServer = await vscode.window.showInputBox({
         title: 'OpenBase: New Project (3/8) — Database server',
         prompt: 'Database server address (leave empty for default)',
-        placeHolder: dbServerDefault,
+        placeHolder: template.label === 'sqlserver' ? '.' : 'localhost',
         value: dbServerDefault,
     });
     if (dbServer === undefined) return;
@@ -128,6 +130,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
             ? 'Database user (leave empty for Windows Authentication)'
             : 'Database user',
         placeHolder: template.label === 'sqlserver' ? 'Windows Auth' : 'postgres',
+        value: prefs.dbUser ?? '',
     });
     if (dbUser === undefined) return;
 
@@ -144,6 +147,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         title: 'OpenBase: New Project (7/8) — MediatR license',
         prompt: 'MediatR commercial license key (leave empty if none)',
         placeHolder: 'Leave empty if not applicable',
+        value: prefs.mediatrLicense ?? '',
     });
     if (mediatrLicense === undefined) return;
 
@@ -151,6 +155,7 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         title: 'OpenBase: New Project (8/8) — AutoMapper license',
         prompt: 'AutoMapper commercial license key (leave empty if none)',
         placeHolder: 'Leave empty if not applicable',
+        value: prefs.automapperLicense ?? '',
     });
     if (automapperLicense === undefined) return;
 
@@ -183,6 +188,14 @@ async function newProject(uri?: vscode.Uri): Promise<void> {
         vscode.window.showErrorMessage(`Failed to create project "${projectName}". Check the output for details.`);
         return;
     }
+
+    await extContext?.globalState.update(NEW_PROJECT_PREFS_KEY, {
+        template: template.label,
+        dbServer: dbServer.trim(),
+        dbUser: dbUser.trim(),
+        mediatrLicense: mediatrLicense.trim(),
+        automapperLicense: automapperLicense.trim(),
+    });
 
     const projectUri = vscode.Uri.file(path.join(cwd, projectName));
     const action = await vscode.window.showInformationMessage(
@@ -567,7 +580,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         this._view = view;
         view.webview.options = { enableScripts: true };
         view.webview.html = this._html();
-        view.webview.onDidReceiveMessage(async (msg) => this._handle(msg, view));
+        view.webview.onDidReceiveMessage(async (msg) => {
+            if (msg.command === 'ready') {
+                const prefs = extContext?.globalState.get<Record<string, string>>(NEW_PROJECT_PREFS_KEY) ?? {};
+                view.webview.postMessage({ command: 'loadNewProjectPrefs', prefs });
+                return;
+            }
+            this._handle(msg, view);
+        });
     }
 
     postNavigateTo(tab: string, query: string): void {
@@ -629,6 +649,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
 
         const ok = await this._exec(`openbase new ${args.join(' ')}`, cwd, view, 'new', 'OpenBase: New Project');
         if (!ok) return;
+
+        await extContext?.globalState.update(NEW_PROJECT_PREFS_KEY, {
+            template: d.template,
+            dbServer: d.dbServer,
+            dbUser: d.dbUser,
+            mediatrLicense: d.mediatrLicense,
+            automapperLicense: d.automapperLicense,
+        });
 
         const projectUri = vscode.Uri.file(path.join(cwd, d.name));
         const action = await vscode.window.showInformationMessage(`Project "${d.name}" created successfully!`, 'Open Folder', 'Open in New Window');
@@ -863,8 +891,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     <div class="field"><label>DB User</label><input id="new-usr" type="text" placeholder="Windows Auth / postgres"></div>
     <div class="field"><label>DB Password</label><input id="new-pwd" type="password"></div>
     <hr>
-    <div class="field"><label>MediatR License</label><input id="new-mediatR" type="text" placeholder="(optional)"></div>
-    <div class="field"><label>AutoMapper License</label><input id="new-automapper" type="text" placeholder="(optional)"></div>
+    <div class="field"><label>MediatR License</label><textarea id="new-mediatR" rows="3" placeholder="(optional)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);padding:4px 6px"></textarea></div>
+    <div class="field"><label>AutoMapper License</label><textarea id="new-automapper" rows="3" placeholder="(optional)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);padding:4px 6px"></textarea></div>
     <hr>
     <div class="field"><label>Destination folder</label>
       <div class="row">
@@ -1104,7 +1132,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
-      if (m.command === 'folderPicked') {
+      if (m.command === 'loadNewProjectPrefs') {
+        var p = m.prefs || {};
+        if (p.template) document.getElementById('new-tpl').value = p.template;
+        if (p.dbServer)  document.getElementById('new-srv').value = p.dbServer;
+        if (p.dbUser)    document.getElementById('new-usr').value = p.dbUser;
+        if (p.mediatrLicense)    document.getElementById('new-mediatR').value = p.mediatrLicense;
+        if (p.automapperLicense) document.getElementById('new-automapper').value = p.automapperLicense;
+      } else if (m.command === 'folderPicked') {
         document.getElementById('new-folder').value = m.path;
       } else if (m.command === 'done') {
         loading(m.ctx, false);
@@ -1424,6 +1459,7 @@ function getNonce(): string {
     return text;
 }
 
+const NEW_PROJECT_PREFS_KEY = 'newProjectPrefs';
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
 const HTTP_HISTORY_KEY = 'httpCallHistory';
