@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.5.4",
+  "version": "10.5.5",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -426,6 +426,18 @@
         "icon": "$(play-circle)"
       },
       {
+        "command": "openbase.solutionExplorer.runAll",
+        "title": "Run Solution",
+        "category": "OpenBase",
+        "icon": "$(run)"
+      },
+      {
+        "command": "openbase.solutionExplorer.debug",
+        "title": "Start Debugging",
+        "category": "OpenBase",
+        "icon": "$(debug-alt)"
+      },
+      {
         "command": "openbase.solutionExplorer.collapseAll",
         "title": "Collapse All",
         "category": "OpenBase",
@@ -587,9 +599,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "openbase.solutionExplorer.refresh",
+          "command": "openbase.solutionExplorer.runAll",
           "when": "view == openbase.solutionexplorer.tree",
           "group": "navigation@2"
+        },
+        {
+          "command": "openbase.solutionExplorer.debug",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "openbase.solutionExplorer.refresh",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [

@@ -7095,6 +7095,42 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
             openTerminal('Build Solution', cwd, `dotnet build ${target}`);
         }),
 
+        vscode.commands.registerCommand('openbase.solutionExplorer.runAll', () => {
+            const proj = findEntryProject(cwd);
+            const target = proj ? `"${proj.csprojPath}"` : '.';
+            openTerminal('Run Solution', cwd, `dotnet run --project ${target}`);
+        }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.debug', async () => {
+            const folder = vscode.workspace.workspaceFolders?.[0];
+            if (!folder) return;
+
+            const launchConfigs: vscode.DebugConfiguration[] | undefined =
+                vscode.workspace.getConfiguration('launch', folder.uri).get('configurations');
+
+            if (launchConfigs && launchConfigs.length > 0) {
+                await vscode.debug.startDebugging(folder, launchConfigs[0]);
+            } else {
+                const proj = findEntryProject(cwd);
+                if (!proj) {
+                    vscode.window.showErrorMessage('Nenhum projeto encontrado para depurar.');
+                    return;
+                }
+                const config: vscode.DebugConfiguration = {
+                    name: proj.assemblyName,
+                    type: 'coreclr',
+                    request: 'launch',
+                    program: path.join(path.dirname(proj.csprojPath), 'bin', 'Debug', proj.targetFramework, `${proj.assemblyName}.dll`),
+                    args: [],
+                    cwd: path.dirname(proj.csprojPath),
+                    stopAtEntry: false,
+                    env: { ASPNETCORE_ENVIRONMENT: 'Development' },
+                    preLaunchTask: 'dotnet: build',
+                };
+                await vscode.debug.startDebugging(folder, config);
+            }
+        }),
+
         vscode.commands.registerCommand('openbase.solutionExplorer.build',
             (item: SolutionNode) => {
                 if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
