@@ -2573,9 +2573,32 @@ function detectApiUrl(cwd: string): string {
 
 let httpPanel: vscode.WebviewPanel | undefined;
 
+function ensureLocalEnv(baseUrl: string): void {
+    if (!baseUrl) return;
+    const dir = getEnvsDir();
+    if (!dir) return;
+    const localFile = path.join(dir, 'local.json');
+    if (fs.existsSync(localFile)) {
+        try {
+            const existing = JSON.parse(fs.readFileSync(localFile, 'utf-8')) as HttpEnvFile;
+            if (existing.variables?.LOCAL_URL === baseUrl) return;
+            existing.variables = { ...existing.variables, LOCAL_URL: baseUrl };
+            fs.writeFileSync(localFile, JSON.stringify(existing, null, 2), 'utf-8');
+        } catch {}
+        return;
+    }
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(localFile, JSON.stringify({ name: 'Local', variables: { LOCAL_URL: baseUrl } }, null, 2), 'utf-8');
+        const active = extContext?.workspaceState.get<string>(HTTP_ACTIVE_ENV_KEY) ?? '';
+        if (!active) extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, 'local.json');
+    } catch {}
+}
+
 async function httpRunner(): Promise<void> {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const baseUrl = cwd ? detectApiUrl(cwd) : '';
+    ensureLocalEnv(baseUrl);
 
     if (httpPanel) {
         httpPanel.reveal(vscode.ViewColumn.One);
