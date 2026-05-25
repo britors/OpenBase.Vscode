@@ -2,7 +2,7 @@
   "name": "openbase-vscode",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.4.7",
+  "version": "10.5.1",
   "publisher": "openbase",
   "icon": "icon.png",
   "engines": {
@@ -45,6 +45,11 @@
           "id": "openbase-tools",
           "title": "OpenBase Tools",
           "icon": "icon-tools.svg"
+        },
+        {
+          "id": "openbase-solutionexplorer",
+          "title": "OpenBase Solution Explorer",
+          "icon": "icon-solutionexplorer.svg"
         }
       ]
     },
@@ -102,6 +107,12 @@
         {
           "id": "openbase.migrationrunner.migrations",
           "name": "Migrations"
+        }
+      ],
+      "openbase-solutionexplorer": [
+        {
+          "id": "openbase.solutionexplorer.tree",
+          "name": "Solution Explorer"
         }
       ],
       "openbase-tools": [
@@ -401,6 +412,36 @@
         "title": "Update Package",
         "category": "OpenBase",
         "icon": "$(arrow-circle-up)"
+      },
+      {
+        "command": "openbase.solutionExplorer.refresh",
+        "title": "Refresh",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.solutionExplorer.collapseAll",
+        "title": "Collapse All",
+        "category": "OpenBase",
+        "icon": "$(collapse-all)"
+      },
+      {
+        "command": "openbase.solutionExplorer.build",
+        "title": "Build Project",
+        "category": "OpenBase",
+        "icon": "$(play)"
+      },
+      {
+        "command": "openbase.solutionExplorer.run",
+        "title": "Run Project",
+        "category": "OpenBase",
+        "icon": "$(run)"
+      },
+      {
+        "command": "openbase.solutionExplorer.openTerminal",
+        "title": "Open in Terminal",
+        "category": "OpenBase",
+        "icon": "$(terminal)"
       }
     ],
     "keybindings": [
@@ -533,6 +574,11 @@
           "command": "openbase.dependencyInspector.refresh",
           "when": "view == openbase.depinspector.packages",
           "group": "navigation@3"
+        },
+        {
+          "command": "openbase.solutionExplorer.refresh",
+          "when": "view == openbase.solutionexplorer.tree",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -620,6 +666,21 @@
           "command": "openbase.dependencyInspector.update",
           "when": "view == openbase.depinspector.packages && viewItem == dep-outdated",
           "group": "inline"
+        },
+        {
+          "command": "openbase.solutionExplorer.build",
+          "when": "view == openbase.solutionexplorer.tree && viewItem == project",
+          "group": "openbase@1"
+        },
+        {
+          "command": "openbase.solutionExplorer.run",
+          "when": "view == openbase.solutionexplorer.tree && viewItem == project",
+          "group": "openbase@2"
+        },
+        {
+          "command": "openbase.solutionExplorer.openTerminal",
+          "when": "view == openbase.solutionexplorer.tree && viewItem == project",
+          "group": "openbase@3"
         }
       ],
       "explorer/context": [
