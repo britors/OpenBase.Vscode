@@ -37,24 +37,14 @@
           "icon": "icon-erdiagram.svg"
         },
         {
-          "id": "openbase-logviewer",
-          "title": "OpenBase Log Viewer",
-          "icon": "icon-logviewer.svg"
-        },
-        {
           "id": "openbase-migrationrunner",
           "title": "OpenBase Migration Runner",
           "icon": "icon-migrationrunner.svg"
         },
         {
-          "id": "openbase-monitor",
-          "title": "OpenBase Monitor",
-          "icon": "icon-monitor.svg"
-        },
-        {
-          "id": "openbase-depinspector",
-          "title": "OpenBase Dependency Inspector",
-          "icon": "icon-depinspector.svg"
+          "id": "openbase-tools",
+          "title": "OpenBase Tools",
+          "icon": "icon-tools.svg"
         }
       ]
     },
@@ -103,13 +93,6 @@
           "name": "ER Diagram"
         }
       ],
-      "openbase-logviewer": [
-        {
-          "type": "webview",
-          "id": "openbase.logviewer.sidebar",
-          "name": "Log Viewer"
-        }
-      ],
       "openbase-migrationrunner": [
         {
           "type": "webview",
@@ -121,14 +104,17 @@
           "name": "Migrations"
         }
       ],
-      "openbase-monitor": [
+      "openbase-tools": [
+        {
+          "type": "webview",
+          "id": "openbase.logviewer.sidebar",
+          "name": "Log Viewer"
+        },
         {
           "type": "webview",
           "id": "openbase.monitor.sidebar",
           "name": "Monitor"
-        }
-      ],
-      "openbase-depinspector": [
+        },
         {
           "type": "webview",
           "id": "openbase.depinspector.sidebar",
