@@ -6825,6 +6825,214 @@ function setupEndpointsMap(context: vscode.ExtensionContext): void {
     endpointsProvider.refresh();
 }
 
+// ─── solution explorer ───────────────────────────────────────────────────────
+
+type SolutionNodeKind = 'solution' | 'project' | 'folder' | 'file';
+
+const SE_IGNORED_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs', '.idea']);
+
+const SE_FILE_ICONS: Record<string, string> = {
+    '.cs':   'symbol-class',
+    '.csx':  'symbol-class',
+    '.json': 'bracket',
+    '.xml':  'code',
+    '.http': 'globe',
+    '.rest': 'globe',
+    '.sql':  'database',
+    '.md':   'book',
+    '.ts':   'symbol-variable',
+    '.js':   'symbol-variable',
+    '.yaml': 'list-tree',
+    '.yml':  'list-tree',
+    '.env':  'lock',
+    '.txt':  'file-text',
+    '.sh':   'terminal',
+    '.ps1':  'terminal',
+};
+
+class SolutionNode extends vscode.TreeItem {
+    constructor(
+        public readonly fsPath: string,
+        public readonly kind: SolutionNodeKind,
+        label?: string,
+    ) {
+        super(
+            label ?? path.basename(fsPath),
+            kind === 'solution' ? vscode.TreeItemCollapsibleState.Expanded
+                : kind === 'file' ? vscode.TreeItemCollapsibleState.None
+                : vscode.TreeItemCollapsibleState.Collapsed,
+        );
+        this.contextValue = kind;
+        this.tooltip = fsPath;
+        this.resourceUri = vscode.Uri.file(fsPath);
+
+        switch (kind) {
+            case 'solution':
+                this.iconPath = new vscode.ThemeIcon('layers');
+                break;
+            case 'project':
+                this.iconPath = new vscode.ThemeIcon('symbol-namespace');
+                this.description = '.csproj';
+                break;
+            case 'folder':
+                this.iconPath = vscode.ThemeIcon.Folder;
+                break;
+            case 'file':
+                this.iconPath = new vscode.ThemeIcon(
+                    SE_FILE_ICONS[path.extname(fsPath).toLowerCase()] ?? 'file',
+                );
+                this.command = {
+                    command: 'vscode.open',
+                    title: 'Open File',
+                    arguments: [vscode.Uri.file(fsPath)],
+                };
+                break;
+        }
+    }
+}
+
+function parseSln(slnPath: string): { name: string; csprojPath: string }[] {
+    let content: string;
+    try { content = fs.readFileSync(slnPath, 'utf-8'); } catch { return []; }
+    const dir = path.dirname(slnPath);
+    const results: { name: string; csprojPath: string }[] = [];
+    const re = /^Project\("[^"]+"\)\s*=\s*"([^"]+)",\s*"([^"\\]+(?:\\[^"\\]+)*\.csproj)"/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+        const name = m[1];
+        const rel = m[2].replace(/\\/g, path.sep);
+        const csprojPath = path.resolve(dir, rel);
+        if (fs.existsSync(csprojPath)) results.push({ name, csprojPath });
+    }
+    return results;
+}
+
+function seWalkDir(dir: string): SolutionNode[] {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+    const folders = entries
+        .filter(e => e.isDirectory() && !SE_IGNORED_DIRS.has(e.name))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(e => new SolutionNode(path.join(dir, e.name), 'folder'));
+    const files = entries
+        .filter(e => e.isFile())
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(e => new SolutionNode(path.join(dir, e.name), 'file'));
+    return [...folders, ...files];
+}
+
+let solutionExplorerProvider: SolutionExplorerProvider | undefined;
+
+class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<SolutionNode | undefined | void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    constructor(private readonly cwd: string) {}
+
+    refresh(): void { this._onDidChangeTreeData.fire(); }
+
+    getTreeItem(e: SolutionNode): vscode.TreeItem { return e; }
+
+    getChildren(element?: SolutionNode): vscode.ProviderResult<SolutionNode[]> {
+        if (!element) return this._roots();
+        if (element.kind === 'solution') return this._projectsFromSln(element.fsPath);
+        if (element.kind === 'project') return seWalkDir(path.dirname(element.fsPath));
+        if (element.kind === 'folder') return seWalkDir(element.fsPath);
+        return [];
+    }
+
+    private _roots(): SolutionNode[] {
+        let slnFiles: string[] = [];
+        try {
+            slnFiles = fs.readdirSync(this.cwd)
+                .filter(f => f.endsWith('.sln'))
+                .sort()
+                .map(f => path.join(this.cwd, f));
+        } catch {}
+
+        if (slnFiles.length > 0) {
+            return slnFiles.map(s => new SolutionNode(s, 'solution', path.basename(s, '.sln')));
+        }
+
+        return this._findCsprojs(this.cwd);
+    }
+
+    private _projectsFromSln(slnPath: string): SolutionNode[] {
+        return parseSln(slnPath).map(p => new SolutionNode(p.csprojPath, 'project', p.name));
+    }
+
+    private _findCsprojs(dir: string): SolutionNode[] {
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+        const results: SolutionNode[] = [];
+        for (const e of entries) {
+            if (e.isFile() && e.name.endsWith('.csproj')) {
+                results.push(new SolutionNode(path.join(dir, e.name), 'project', path.basename(e.name, '.csproj')));
+            } else if (e.isDirectory() && !SE_IGNORED_DIRS.has(e.name)) {
+                try {
+                    const sub = fs.readdirSync(path.join(dir, e.name)).filter(f => f.endsWith('.csproj'));
+                    for (const f of sub) {
+                        results.push(new SolutionNode(path.join(dir, e.name, f), 'project', path.basename(f, '.csproj')));
+                    }
+                } catch {}
+            }
+        }
+        return results;
+    }
+}
+
+function setupSolutionExplorer(context: vscode.ExtensionContext): void {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!cwd) return;
+
+    solutionExplorerProvider = new SolutionExplorerProvider(cwd);
+
+    const treeView = vscode.window.createTreeView('openbase.solutionexplorer.tree', {
+        treeDataProvider: solutionExplorerProvider,
+        showCollapseAll: true,
+    });
+
+    const watcher = vscode.workspace.createFileSystemWatcher('**/{*.sln,*.csproj}');
+    watcher.onDidCreate(() => solutionExplorerProvider?.refresh());
+    watcher.onDidDelete(() => solutionExplorerProvider?.refresh());
+    watcher.onDidChange(() => solutionExplorerProvider?.refresh());
+
+    context.subscriptions.push(
+        treeView,
+        watcher,
+
+        vscode.workspace.onDidChangeWorkspaceFolders(() => solutionExplorerProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.refresh',
+            () => solutionExplorerProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.build',
+            (item: SolutionNode) => {
+                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
+                openTerminal('Build', path.dirname(item.fsPath), `dotnet build "${item.fsPath}"`);
+            }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.run',
+            (item: SolutionNode) => {
+                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
+                openTerminal('Run', path.dirname(item.fsPath), `dotnet run --project "${item.fsPath}"`);
+            }),
+
+        vscode.commands.registerCommand('openbase.solutionExplorer.openTerminal',
+            (item: SolutionNode) => {
+                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
+                const projDir = path.dirname(item.fsPath);
+                const projName = path.basename(item.fsPath, '.csproj');
+                const terminal = vscode.window.createTerminal({
+                    name: `OpenBase: ${projName}`,
+                    cwd: projDir,
+                    env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
+                });
+                terminal.show();
+            }),
+    );
+}
+
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
@@ -6862,6 +7070,7 @@ export function activate(context: vscode.ExtensionContext): void {
     setupMigrationRunner(context);
     setupDepInspector(context);
     setupEndpointsMap(context);
+    setupSolutionExplorer(context);
 
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
