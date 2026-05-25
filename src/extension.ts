@@ -1914,6 +1914,14 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   .explain-tree{padding:12px;overflow:auto;flex:1}
   .explain-node{margin-left:14px;border-left:2px solid rgba(180,79,255,.2);padding-left:10px;margin-top:6px}
   .explain-root{margin-left:0!important;border-left:none!important;padding-left:0!important;margin-top:0!important}
+  #result-tabs{display:flex;flex-shrink:0;border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);overflow-x:auto;overflow-y:hidden;min-height:28px}
+  .result-tab{display:flex;align-items:center;gap:5px;padding:3px 10px;cursor:pointer;font-size:11px;border-right:1px solid var(--ob-border);white-space:nowrap;user-select:none;color:var(--ob-dim);border-top:2px solid transparent}
+  .result-tab.active{color:var(--ob-text);background:var(--ob-bg0);border-top-color:var(--ob-purple)}
+  .result-tab:hover:not(.active){background:rgba(180,79,255,.07)}
+  .result-tab-label{max-width:160px;overflow:hidden;text-overflow:ellipsis}
+  .result-tab-close{opacity:0;font-size:10px;line-height:1;padding:1px 3px;border-radius:2px;flex-shrink:0}
+  .result-tab-close:hover{background:rgba(255,63,164,.25);opacity:1!important;color:var(--ob-pink)}
+  .result-tab:hover .result-tab-close{opacity:.5}
   .node-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:3px 0}
   .node-op{font-weight:600;font-size:12px;color:var(--ob-text)}
   .node-detail{font-size:11px;color:var(--ob-dim);font-style:italic}
@@ -1943,6 +1951,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   <span class="hint">F8 to run</span>
   <span id="status" class="status"></span>
 </div>
+<div id="result-tabs" class="hidden"></div>
 <div id="results" class="results">
   <p class="placeholder">Write a query above and press Run or F8</p>
 </div>
@@ -1977,6 +1986,10 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   var historyEntries = [];
   var historyVisible = false;
   var activePanel = 'results'; // 'results' | 'history' | 'explain'
+  var resultTabs = [];
+  var activeTabId = null;
+  var tabCounter = 0;
+  var lastRunSql = '';
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -2031,6 +2044,12 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   });
   document.getElementById('back-from-explain-btn').addEventListener('click', function() {
     showPanel('results');
+  });
+  document.getElementById('result-tabs').addEventListener('click', function(e) {
+    var closeBtn = e.target.closest('[data-close-id]');
+    if (closeBtn) { closeTab(parseInt(closeBtn.getAttribute('data-close-id'), 10)); return; }
+    var tabEl = e.target.closest('[data-tab-id]');
+    if (tabEl) activateTab(parseInt(tabEl.getAttribute('data-tab-id'), 10));
   });
   document.getElementById('results').addEventListener('click', function(e) {
     if (e.target && e.target.id === 'export-csv-btn') exportCsv();
@@ -2165,6 +2184,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       document.getElementById('results').innerHTML = '<p class="placeholder">Enter a SQL query above before running.</p>';
       return;
     }
+    lastRunSql = sql;
     running = true;
     t0 = Date.now();
     document.getElementById('run-btn').classList.add('hidden');
@@ -2263,18 +2283,75 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 
   function renderResult(columns, rows, message, elapsed) {
     setStatus('');
-    lastColumns = columns || [];
-    lastRows = rows || [];
     if (!columns || !columns.length) {
-      lastColumns = []; lastRows = [];
+      document.getElementById('results').innerHTML =
+        '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
+      return;
+    }
+    tabCounter++;
+    var firstLine = lastRunSql.trim().split('\\n')[0].trim();
+    var label = '#' + tabCounter + ' ' + (firstLine.length > 24 ? firstLine.slice(0, 23) + '…' : firstLine);
+    var tab = { id: tabCounter, label: label, columns: columns || [], rows: rows || [], message: message, elapsed: elapsed };
+    resultTabs.push(tab);
+    if (resultTabs.length > 10) resultTabs.shift();
+    activateTab(tab.id);
+    showPanel('results');
+  }
+
+  function activateTab(id) {
+    var tab = null;
+    for (var i = 0; i < resultTabs.length; i++) { if (resultTabs[i].id === id) { tab = resultTabs[i]; break; } }
+    if (!tab) return;
+    activeTabId = id;
+    lastColumns = tab.columns;
+    lastRows = tab.rows;
+    renderTabBar();
+    renderResultContent(tab.columns, tab.rows, tab.message, tab.elapsed);
+  }
+
+  function closeTab(id) {
+    var idx = -1;
+    for (var i = 0; i < resultTabs.length; i++) { if (resultTabs[i].id === id) { idx = i; break; } }
+    if (idx === -1) return;
+    resultTabs.splice(idx, 1);
+    if (activeTabId === id) {
+      if (resultTabs.length > 0) {
+        activateTab(resultTabs[Math.min(idx, resultTabs.length - 1)].id);
+      } else {
+        activeTabId = null; lastColumns = []; lastRows = [];
+        document.getElementById('results').innerHTML = '<p class="placeholder">Write a query above and press Run or F8</p>';
+        renderTabBar();
+      }
+    } else {
+      renderTabBar();
+    }
+  }
+
+  function renderTabBar() {
+    var bar = document.getElementById('result-tabs');
+    if (!resultTabs.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    bar.classList.remove('hidden');
+    var html = '';
+    for (var i = 0; i < resultTabs.length; i++) {
+      var t = resultTabs[i];
+      html += '<div class="result-tab' + (t.id === activeTabId ? ' active' : '') + '" data-tab-id="' + t.id + '">'
+            + '<span class="result-tab-label" title="' + esc(t.label) + '">' + esc(t.label) + '</span>'
+            + '<span class="result-tab-close" data-close-id="' + t.id + '">✕</span>'
+            + '</div>';
+    }
+    bar.innerHTML = html;
+  }
+
+  function renderResultContent(columns, rows, message, elapsed) {
+    if (!columns || !columns.length) {
       document.getElementById('results').innerHTML =
         '<div class="msg-box">' + esc(message || 'Command completed.') + '</div>';
       return;
     }
     var rowCount = rows ? rows.length : 0;
-    var infoMsg = message ? ' · ' + esc(message) : '';
+    var infoMsg = message ? ' \xB7 ' + esc(message) : '';
     var hdr = '<div class="result-header">'
-            + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' · ' + elapsed + infoMsg + '</span>'
+            + '<span>' + rowCount + ' row' + (rowCount !== 1 ? 's' : '') + ' \xB7 ' + elapsed + infoMsg + '</span>'
             + '<button id="export-csv-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Export CSV</button>'
             + '</div>';
     var tbl = '<table><thead><tr>';
@@ -2301,7 +2378,9 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 
   function showPanel(which) {
     activePanel = which;
-    document.getElementById('results').classList.toggle('hidden', which !== 'results');
+    var showResults = which === 'results';
+    document.getElementById('result-tabs').classList.toggle('hidden', !showResults || !resultTabs.length);
+    document.getElementById('results').classList.toggle('hidden', !showResults);
     document.getElementById('history-panel').classList.toggle('hidden', which !== 'history');
     document.getElementById('explain-panel').classList.toggle('hidden', which !== 'explain');
     historyVisible = (which === 'history');
