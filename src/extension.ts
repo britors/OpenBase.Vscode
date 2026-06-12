@@ -8,7 +8,7 @@ import { execSync, exec, spawn } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
-const EXTENSIONS = ['jwt', 'redis', 'healthchecks', 'mongodb'] as const;
+const EXTENSIONS = ['jwt', 'redis', 'healthchecks', 'mongodb', 'domainevents'] as const;
 const SPECIALIST_TYPES = ['query', 'command', 'httpcall'] as const;
 const PARAM_TYPES = ['string', 'int', 'bool', 'decimal', 'Guid', 'DateTime', 'long', 'double', 'float', 'short'] as const;
 const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {};
@@ -557,6 +557,7 @@ function extensionLabel(e: string): string {
         case 'redis':        return 'Redis';
         case 'healthchecks': return 'Health Checks';
         case 'mongodb':      return 'MongoDB';
+        case 'domainevents': return 'Domain Events';
         default:             return e;
     }
 }
@@ -986,6 +987,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         <option value="healthchecks">Health Checks</option>
         <option value="redis">Redis</option>
         <option value="mongodb">MongoDB</option>
+        <option value="domainevents">Domain Events</option>
       </select>
     </div>
     <div id="ext-err" class="err"></div>
