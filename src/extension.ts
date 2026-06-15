@@ -665,47 +665,18 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         else if (action === 'Open in New Window') vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
     }
 
-    private async _scaffoldUpdate(d: { entity: string; schema: string; table: string; runMigrations: boolean }, view: vscode.WebviewView): Promise<void> {
+    private async _scaffoldUpdate(d: { entity: string }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'scu' }); return; }
-
-        const args = [`-e ${d.entity}`, '--update'];
-        if (d.schema)        args.push(`--schema "${d.schema}"`);
-        if (d.table)         args.push(`--table "${d.table}"`);
-        if (d.runMigrations) args.push('--run-migrations');
-
-        openTerminal('Scaffold Update', cwd, `openbase scaffold ${args.join(' ')}`);
-        view.webview.postMessage({ command: 'done', ctx: 'scu', text: 'Terminal aberto — confirme o diff e as alterações no terminal.' });
+        openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${d.entity} --update`);
+        view.webview.postMessage({ command: 'done', ctx: 'scu' });
     }
 
-    private async _scaffold(d: { entity: string; mode: string; schema: string; table: string; runMigrations: boolean }, view: vscode.WebviewView): Promise<void> {
+    private async _scaffold(d: { entity: string }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
-
-        if (d.mode === 'codefirst') {
-            openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
-            view.webview.postMessage({ command: 'done', ctx: 'sc', text: 'Terminal aberto — preencha as propriedades da entidade no terminal.' });
-            return;
-        }
-
-        const previewDetail = [
-            `Entity: ${d.entity}`,
-            d.schema ? `Schema: ${d.schema}` : '',
-            d.table  ? `Table: ${d.table}` : '',
-            d.runMigrations ? 'Migrations: will run automatically after scaffold' : '',
-        ].filter(Boolean).join('\n');
-        const confirmed = await vscode.window.showInformationMessage(
-            `Scaffold "${d.entity}"`,
-            { modal: true, detail: previewDetail + '\n\nThis will generate or overwrite project files. Proceed?' },
-            'Generate'
-        );
-        if (!confirmed) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
-
-        const args = [`-e ${d.entity}`, '--mode modelfirst'];
-        if (d.schema)         args.push(`--schema "${d.schema}"`);
-        if (d.table)          args.push(`--table "${d.table}"`);
-        if (d.runMigrations)  args.push('--run-migrations');
-        await this._exec(`openbase scaffold ${args.join(' ')}`, cwd, view, 'sc', 'OpenBase: Scaffold');
+        openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
+        view.webview.postMessage({ command: 'done', ctx: 'sc' });
     }
 
     private async _specialist(d: { entity: string; method: string; type: string; sql: string; params: string[]; columns: string[] }, view: vscode.WebviewView): Promise<void> {
@@ -909,18 +880,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <!-- SCAFFOLD -->
   <div id="page-sc" class="page">
     <div class="field"><label>Entity *</label><input id="sc-entity" type="text" placeholder="Product"></div>
-    <div class="field"><label>Mode</label>
-      <select id="sc-mode" onchange="onScMode()">
-        <option value="modelfirst">Model First — reads from DB</option>
-        <option value="codefirst">Code First — interactive terminal</option>
-      </select>
-    </div>
-    <div id="sc-mf">
-      <div class="field"><label>Schema</label><input id="sc-schema" type="text" placeholder="dbo"></div>
-      <div class="field"><label>Table</label><input id="sc-table" type="text" placeholder="(auto-detect from entity name)"></div>
-      <div class="field"><label class="check-label"><input id="sc-mig" type="checkbox"> Run migrations after scaffold</label></div>
-    </div>
-    <p id="sc-cf-hint" class="hint hidden">Um terminal será aberto para a coleta interativa de propriedades.</p>
     <div id="sc-err" class="err"></div>
     <div id="sc-ok" class="ok"></div>
     <button id="sc-btn" class="btn-primary" onclick="submitScaffold()" data-label="Run Scaffold">Run Scaffold</button>
@@ -930,9 +889,6 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
   <div id="page-scu" class="page">
     <p class="hint" style="margin-bottom:10px">Lê o schema do banco, compara com a entidade existente e regera os 16 arquivos dependentes de propriedades.</p>
     <div class="field"><label>Entity *</label><input id="scu-entity" type="text" placeholder="Product"></div>
-    <div class="field"><label>Schema</label><input id="scu-schema" type="text" placeholder="dbo (auto-detect)"></div>
-    <div class="field"><label>Table</label><input id="scu-table" type="text" placeholder="(auto-detect from entity name)"></div>
-    <div class="field"><label class="check-label"><input id="scu-mig" type="checkbox"> Run migrations after update</label></div>
     <p class="hint">Um terminal será aberto para exibir o diff e confirmar as alterações.</p>
     <div id="scu-err" class="err"></div>
     <div id="scu-ok" class="ok"></div>
@@ -1084,9 +1040,8 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     function clearFields(ctx) {
       if (ctx === 'sc') {
         document.getElementById('sc-entity').value = '';
-        document.getElementById('sc-schema').value = '';
-        document.getElementById('sc-table').value = '';
-        document.getElementById('sc-mig').checked = false;
+      } else if (ctx === 'scu') {
+        document.getElementById('scu-entity').value = '';
       } else if (ctx === 'sp') {
         document.getElementById('sp-entity').value = '';
         document.getElementById('sp-method').value = '';
@@ -1185,13 +1140,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       if (!entity) { err('sc', 'Entity name is required.'); return; }
       if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('sc', 'Must be PascalCase (e.g. Product).'); return; }
       loading('sc', true);
-      vscode.postMessage({ command: 'scaffold', data: {
-        entity: entity,
-        mode: document.getElementById('sc-mode').value,
-        schema: document.getElementById('sc-schema').value.trim(),
-        table: document.getElementById('sc-table').value.trim(),
-        runMigrations: document.getElementById('sc-mig').checked,
-      }});
+      vscode.postMessage({ command: 'scaffold', data: { entity: entity }});
     }
 
     function submitScaffoldUpdate() {
@@ -1200,12 +1149,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
       if (!entity) { err('scu', 'Entity name is required.'); return; }
       if (!/^[A-Z][a-zA-Z0-9]*$/.test(entity)) { err('scu', 'Must be PascalCase (e.g. Product).'); return; }
       loading('scu', true);
-      vscode.postMessage({ command: 'scaffoldUpdate', data: {
-        entity: entity,
-        schema: document.getElementById('scu-schema').value.trim(),
-        table: document.getElementById('scu-table').value.trim(),
-        runMigrations: document.getElementById('scu-mig').checked,
-      }});
+      vscode.postMessage({ command: 'scaffoldUpdate', data: { entity: entity }});
     }
 
     function submitSpecialist() {
