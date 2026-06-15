@@ -12,6 +12,7 @@ The OpenBase CLI must be installed globally:
 
 ```bash
 dotnet tool install -g w3ti.OpenBase.CLI
+openbase install
 ```
 
 > Requires .NET SDK 10 or later.
