@@ -1,5 +1,5 @@
 {
-  "name": "openbase-vscode",
+  "name": "openbase",
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
   "version": "10.7.0",
