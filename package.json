@@ -3,7 +3,7 @@
   "displayName": "OpenBase CLI",
   "description": "Visual Studio Code extension for OpenBase CLI",
   "version": "10.7.0",
-  "publisher": "openbase",
+  "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.90.0"
