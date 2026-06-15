@@ -7453,6 +7453,91 @@ export function activate(context: vscode.ExtensionContext): void {
     setupEndpointsMap(context);
     setupSolutionExplorer(context);
 
+    // Helper to execute commands
+    const execute = async (command: string, message: string, stream: any) => {
+        stream.markdown(message + '\n\n*Running command...*');
+        try {
+            await vscode.commands.executeCommand(command);
+            stream.markdown(`\n\n✅ Command \`${command}\` executed successfully.`);
+        } catch (error) {
+            stream.markdown(`\n\n❌ Error executing \`${command}\`: ${error}`);
+        }
+    };
+
+    // Register Chat Participant
+    const chatParticipant = vscode.chat.createChatParticipant('openbase.participant', async (request, context, stream, token) => {
+        const prompt = request.prompt.toLowerCase();
+        
+        // Persistent State (Memento)
+        const STATE_KEY = 'openbase.chatHistory';
+        const workspaceState = extContext ? extContext.workspaceState : undefined;
+        const history = context.history.length > 0 
+            ? (context.history.map(h => (h as any).prompt)) 
+            : (workspaceState ? workspaceState.get<string[]>(STATE_KEY) || [] : []);
+        
+        history.push(prompt);
+        if (workspaceState) {
+            workspaceState.update(STATE_KEY, history.slice(-10)); // Keep last 10
+        }
+
+        const getActiveContext = () => {
+            const editor = vscode.window.activeTextEditor;
+            return editor ? {
+                fileName: editor.document.fileName,
+                content: editor.document.getText(),
+                language: editor.document.languageId
+            } : null;
+        };
+
+        if (prompt.includes('context')) {
+            const ctx = getActiveContext();
+            if (ctx) {
+                stream.markdown(`Currently editing: \`${ctx.fileName}\` (${ctx.language})`);
+            } else {
+                stream.markdown('No active file context found.');
+            }
+            return;
+        }
+
+        // Solution / Build / Run
+        if (prompt.includes('migrate') || prompt.includes('run migrations')) {
+            await execute('openbase.migrationRunner.migrateUp', 'Running migrations...', stream);
+        } else if (prompt.includes('build solution') || prompt.includes('build')) {
+            await execute('openbase.solutionExplorer.buildAll', 'Building solution...', stream);
+        } else if (prompt.includes('run solution') || prompt.includes('run')) {
+            await execute('openbase.solutionExplorer.runAll', 'Running solution...', stream);
+        } else if (prompt.includes('test')) {
+            await execute('openbase.solutionExplorer.test', 'Running tests...', stream);
+        } 
+        
+        // Tools / Panels
+        else if (prompt.includes('sql') || prompt.includes('database')) {
+            await execute('openbase.sqlRunner', 'Opening SQL Runner...', stream);
+        } else if (prompt.includes('http') || prompt.includes('api')) {
+            await execute('openbase.httpRunner', 'Opening HTTP Runner...', stream);
+        } else if (prompt.includes('log')) {
+            await execute('openbase.logViewer', 'Opening Log Viewer...', stream);
+        } else if (prompt.includes('monitor')) {
+            await execute('openbase.monitor', 'Opening Monitor...', stream);
+        } 
+        
+        // CLI Actions
+        else if (prompt.includes('new project')) {
+            await execute('openbase.newProject', 'Starting new project wizard...', stream);
+        } else if (prompt.includes('scaffold')) {
+            await execute('openbase.scaffold', 'Starting scaffold wizard...', stream);
+        } else if (prompt.includes('history')) {
+            await execute('openbase.history', 'Opening history...', stream);
+        } else if (prompt.includes('version')) {
+            await execute('openbase.version', 'Checking version...', stream);
+        } else if (prompt.includes('add extension')) {
+            await execute('openbase.extensionAdd', 'Adding extension...', stream);
+        } else {
+            stream.markdown('I understand commands related to: migrations, build/run/test solution, SQL runner, HTTP runner, logs, monitor, new project, scaffold, history, version, and extensions.');
+        }
+    });
+    context.subscriptions.push(chatParticipant);
+
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
 
