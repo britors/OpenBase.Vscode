@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.7.1",
+  "version": "10.7.3",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -14,6 +14,14 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "openbase.participant",
+        "name": "openbase",
+        "description": "Interact with OpenBase tools and CLI",
+        "isSticky": false
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {

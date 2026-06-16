@@ -7453,6 +7453,66 @@ export function activate(context: vscode.ExtensionContext): void {
     setupEndpointsMap(context);
     setupSolutionExplorer(context);
 
+    // Helper to execute commands
+    const execute = async (command: string, message: string, stream: any) => {
+        stream.markdown(message + '\n\n*Running command...*');
+        try {
+            await vscode.commands.executeCommand(command);
+            stream.markdown(`\n\n✅ Command \`${command}\` executed successfully.`);
+        } catch (error) {
+            stream.markdown(`\n\n❌ Error executing \`${command}\`: ${error}`);
+        }
+    };
+
+    // Chat Participant
+    const chatParticipant = vscode.chat.createChatParticipant('openbase.participant', async (request, context, stream, token) => {
+        const prompt = request.prompt.toLowerCase();
+
+        // Regex para capturar: implemente a issue #tipo/numero
+        const issueMatch = prompt.match(/implemente a issue\s+#([a-z]+)\/(\d+)/);
+        if (issueMatch) {
+            const type = issueMatch[1];
+            const id = issueMatch[2];
+            await handleIssueImplementation(type, id, stream);
+            return;
+        }
+
+        // ... (rest of the existing logic)
+    });
+
+    // Handler para implementação de issue
+    async function handleIssueImplementation(type: string, id: string, stream: any) {
+        stream.markdown(`Analisando issue \`#${type}/${id}\`...`);
+
+        let command = '';
+        let message = '';
+
+        switch (type) {
+            case 'feature':
+                message = `Feature #${id} detectada. Preparando scaffold...`;
+                command = 'openbase.scaffold';
+                break;
+            case 'fix':
+                message = `Fix #${id} detectado. Preparando atualização de scaffold...`;
+                command = 'openbase.scaffoldUpdate';
+                break;
+            case 'api':
+                message = `API #${id} detectada. Preparando specialist...`;
+                command = 'openbase.specialist';
+                break;
+            default:
+                stream.markdown(`Tipo de issue \`${type}\` não mapeado para um fluxo automático.`);
+                return;
+        }
+
+        stream.markdown(`\n\n${message}`);
+        try {
+            await vscode.commands.executeCommand(command);
+            stream.markdown(`\n\n✅ Fluxo para \`#${type}/${id}\` iniciado com sucesso.`);
+        } catch (error) {
+            stream.markdown(`\n\n❌ Erro ao iniciar fluxo para \`#${type}/${id}\`: ${error}`);
+        }
+    }
     const reg = (id: string, fn: (uri?: vscode.Uri) => Promise<void>) =>
         vscode.commands.registerCommand(id, fn);
 
