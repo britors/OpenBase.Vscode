@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.10.1",
+  "version": "10.11.0",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
