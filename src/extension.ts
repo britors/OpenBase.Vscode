@@ -7724,30 +7724,31 @@ class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
     async getChildren(element?: TaskItem): Promise<TaskItem[]> {
         if (element) return [];
 
-        return new Promise((resolve) => {
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-            exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, stdout) => {
-                if (err) {
-                    console.error('Error fetching issues:', err);
-                    resolve([]);
-                    return;
-                }
-                try {
-                    const issues = JSON.parse(stdout);
-                    resolve(issues.map((i: any) => new TaskItem(
-                        i.number,
-                        i.title,
-                        i.labels.map((l: any) => l.name),
-                        i.milestone?.title || null,
-                        i.assignees.map((a: any) => a.login)
-                    )));
-                } catch (e) {
-                    console.error('Error parsing issues:', e);
-                    resolve([]);
-                }
+        const tasks: TaskItem[] = [];
+
+        // GitHub Issues (Existing)
+        try {
+            const stdout = await new Promise<string>((resolve, reject) => {
+                const extraPath = dotnetToolsPath();
+                const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+                exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out, stderr) => {
+                    if (err) reject(err);
+                    else resolve(out);
+                });
             });
-        });
+            const issues = JSON.parse(stdout);
+            tasks.push(...issues.map((i: any) => new TaskItem(i.number, i.title, i.labels.map((l: any) => l.name), i.milestone?.title || null, i.assignees.map((a: any) => a.login))));
+        } catch (e) {
+            console.error('Error fetching GitHub issues:', e);
+        }
+
+        // Azure DevOps (Stub)
+        tasks.push(new TaskItem(0, "Azure DevOps Integration (Stub)", ["Azure"], null, []));
+
+        // Jira (Stub)
+        tasks.push(new TaskItem(0, "Jira Integration (Stub)", ["Jira"], null, []));
+
+        return tasks;
     }
 }
 
