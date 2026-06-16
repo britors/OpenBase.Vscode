@@ -3771,7 +3771,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     }
 }
 
-async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; procedures: string[]; dbType: DbTemplate }>> {
+async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
     const extraPath = dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
@@ -3785,7 +3785,7 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 const q = `
                     SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'
                     UNION ALL
-                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, 'PROCEDURE' AS TYPE FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE='PROCEDURE'
+                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES
                     ORDER BY TABLE_SCHEMA, TYPE, TABLE_NAME`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
@@ -3799,7 +3799,7 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 const q = `
                     SELECT table_schema, table_name, 'TABLE' AS type FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema')
                     UNION ALL
-                    SELECT routine_schema, routine_name, 'PROCEDURE' AS type FROM information_schema.routines WHERE routine_type='PROCEDURE' AND routine_schema NOT IN ('pg_catalog','information_schema')
+                    SELECT routine_schema, routine_name, routine_type FROM information_schema.routines WHERE routine_schema NOT IN ('pg_catalog','information_schema')
                     ORDER BY table_schema, type, table_name`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const port = conn.port ?? '5432';
@@ -3813,8 +3813,8 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\n
                     SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER NOT IN (${sysTables})
                     UNION ALL
-                    SELECT OWNER, OBJECT_NAME, 'PROCEDURE' FROM ALL_PROCEDURES WHERE OWNER NOT IN (${sysTables}) AND OBJECT_TYPE='PROCEDURE'
-                    ORDER BY OWNER, TYPE, TABLE_NAME;\n/\nEXIT\n`;
+                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER NOT IN (${sysTables}) AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+                    ORDER BY OWNER, OBJECT_TYPE, OBJECT_NAME;\n/\nEXIT\n`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
@@ -3828,7 +3828,7 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
             });
         });
 
-        const result = new Map<string, { tables: string[]; procedures: string[]; dbType: DbTemplate }>();
+        const result = new Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>();
         const sep = conn.type === 'pgsql' ? ',' : '|';
 
         for (const raw of stdout.split('\n')) {
@@ -3843,12 +3843,14 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
             
             let entry = result.get(schema);
             if (!entry) {
-                entry = { tables: [], procedures: [], dbType: conn.type };
+                entry = { tables: [], procedures: [], functions: [], packages: [], dbType: conn.type };
                 result.set(schema, entry);
             }
             
             if (type === 'TABLE') entry.tables.push(name);
-            else entry.procedures.push(name);
+            else if (type === 'PROCEDURE') entry.procedures.push(name);
+            else if (type === 'FUNCTION') entry.functions.push(name);
+            else if (type === 'PACKAGE') entry.packages.push(name);
         }
         return result;
     } finally {
@@ -7936,6 +7938,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.monitor', () => monitor()),
         vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
         vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
+        vscode.commands.registerCommand('openbase.teamsMeeting', () => vscode.window.showInformationMessage('MS Teams integration opening...')),
+        vscode.commands.registerCommand('openbase.zoomMeeting', () => vscode.window.showInformationMessage('Zoom integration opening...')),
+        vscode.commands.registerCommand('openbase.slackMeeting', () => vscode.window.showInformationMessage('Slack integration opening...')),
         vscode.commands.registerCommand('openbase.quickAccess', async () => {
             const commands = [
                 { label: 'New Project', command: 'openbase.newProject' },
