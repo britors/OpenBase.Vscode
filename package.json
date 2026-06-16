@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.7.4",
+  "version": "10.7.5",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -163,97 +163,97 @@
     "commands": [
       {
         "command": "openbase.quickAccess",
-        "title": "OpenBase: Quick Access",
+        "title": "Quick Access",
         "description": "Acesso rápido a todos os comandos principais do OpenBase.",
         "category": "OpenBase"
       },
       {
         "command": "openbase.newProject",
-        "title": "OpenBase: New Project",
+        "title": "New Project",
         "description": "Cria um novo projeto OpenBase .NET.",
         "category": "OpenBase"
       },
       {
         "command": "openbase.scaffold",
-        "title": "OpenBase: Scaffold",
+        "title": "Scaffold",
         "description": "Gera CRUD completo para uma entidade.",
         "category": "OpenBase"
       },
       {
         "command": "openbase.scaffoldUpdate",
-        "title": "OpenBase: Scaffold Update",
+        "title": "Scaffold Update",
         "category": "OpenBase"
       },
       {
         "command": "openbase.specialist",
-        "title": "OpenBase: Specialist",
+        "title": "Specialist",
         "category": "OpenBase"
       },
       {
         "command": "openbase.procedure",
-        "title": "OpenBase: Procedure",
+        "title": "Procedure",
         "category": "OpenBase"
       },
       {
         "command": "openbase.extensionAdd",
-        "title": "OpenBase: Add Extension",
+        "title": "Add Extension",
         "category": "OpenBase"
       },
       {
         "command": "openbase.extensionList",
-        "title": "OpenBase: List Extensions",
+        "title": "List Extensions",
         "category": "OpenBase"
       },
       {
         "command": "openbase.build",
-        "title": "OpenBase: Build",
+        "title": "Build",
         "category": "OpenBase"
       },
       {
         "command": "openbase.run",
-        "title": "OpenBase: Run",
+        "title": "Run",
         "category": "OpenBase"
       },
       {
         "command": "openbase.update",
-        "title": "OpenBase: Update CLI",
+        "title": "Update CLI",
         "category": "OpenBase"
       },
       {
         "command": "openbase.history",
-        "title": "OpenBase: History",
+        "title": "History",
         "category": "OpenBase"
       },
       {
         "command": "openbase.version",
-        "title": "OpenBase: Version",
+        "title": "Version",
         "category": "OpenBase"
       },
       {
         "command": "openbase.logViewer",
-        "title": "OpenBase: Log Viewer",
+        "title": "Log Viewer",
         "category": "OpenBase"
       },
       {
         "command": "openbase.sqlRunner",
-        "title": "OpenBase: SQL Runner",
+        "title": "SQL Runner",
         "category": "OpenBase",
         "icon": "$(database)"
       },
       {
         "command": "openbase.httpRunner",
-        "title": "OpenBase: HTTP Runner",
+        "title": "HTTP Runner",
         "category": "OpenBase",
         "icon": "$(globe)"
       },
       {
         "command": "openbase.sqlRunner.run",
-        "title": "OpenBase: Run SQL Query",
+        "title": "Run SQL Query",
         "category": "OpenBase"
       },
       {
         "command": "openbase.httpRunner.send",
-        "title": "OpenBase: Send HTTP Request",
+        "title": "Send HTTP Request",
         "category": "OpenBase"
       },
       {
@@ -382,7 +382,7 @@
       },
       {
         "command": "openbase.migrationRunner",
-        "title": "OpenBase: Migration Runner",
+        "title": "Migration Runner",
         "category": "OpenBase"
       },
       {
@@ -417,7 +417,7 @@
       },
       {
         "command": "openbase.monitor",
-        "title": "OpenBase: Monitor",
+        "title": "Monitor",
         "category": "OpenBase"
       },
       {
