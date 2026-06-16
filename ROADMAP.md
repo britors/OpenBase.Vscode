@@ -24,16 +24,27 @@ Este documento organiza o desenvolvimento da extensão, priorizando melhorias pa
 - [ ] **#9** Variáveis de Ambiente no HTTP Runner
 - [ ] **#10** Gráfico de Dependências interativo
 
-### [v10.10] - Estabilidade e DX
-*Foco: Qualidade, testes e experiência do desenvolvedor.*
+### [v10.12] - Integrações e SQL Avançado
+*Foco: Novas integrações de serviço e recursos avançados para o SQLRunner.*
 
-- [ ] **#11** Walkthrough / Tutorial de Boas-vindas
-- [ ] **#12** Detecção Proativa de Dependências (CLI)
-- [ ] **#13** Painel de Configurações (`settings.json`)
-- [ ] **#14** Formulário de Feedback Integrado
-- [ ] **#15** Documentação de Comandos (Tooltips)
-- [ ] **#16** Testes Unitários de Lógica
-- [ ] **#17** Testes E2E (Webview)
-- [ ] **#18** Telemetria (Anônima)
-- [ ] **#19** Log Viewer Inteligente
-- [ ] **#20** Undo/Redo nas Migrations
+- [ ] **#145** Integrar com MS Teams
+- [ ] **#146** Integrar com Zoom Meeting
+- [ ] **#147** Integrar com Slack Meeting
+- [ ] **#148** SQLRunner: suporte a Procedures
+- [ ] **#149** SQLRunner: suporte a Packages e Package Bodies
+- [ ] **#150** SQLRunner: suporte a Functions
+
+### [v10.13] - Infraestrutura e Cloud
+*Foco: Suporte a mais tipos de projetos e extensões de mensagem.*
+
+- [ ] **#151** Minimal API: template e comandos
+- [ ] **#152** Extensão RabbitMQ
+- [ ] **#153** ASP.NET MVC: template e comandos
+- [ ] **#154** Extensão Kafka
+
+### [v10.14] - Template e Autenticação
+*Foco: Refinamento de templates e autenticação.*
+
+- [ ] **#155** Template com suporte a ADO
+- [ ] **#156** Template Angular: corrigir scaffold
+- [ ] **#157** Extensão Okta (templates Angular)
