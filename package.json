@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.7.3",
+  "version": "10.7.4",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -14,6 +14,21 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "walkthroughs": [
+      {
+        "id": "openbase-welcome",
+        "title": "Começando com OpenBase",
+        "description": "Aprenda a usar as funcionalidades principais do OpenBase.",
+        "steps": [
+          {
+            "id": "new-project",
+            "title": "Criar Projeto",
+            "description": "Aprenda a usar o comando 'OpenBase: New Project'.",
+            "media": { "markdown": "walkthroughs/welcome.md" }
+          }
+        ]
+      }
+    ],
     "chatParticipants": [
       {
         "id": "openbase.participant",
@@ -149,16 +164,19 @@
       {
         "command": "openbase.quickAccess",
         "title": "OpenBase: Quick Access",
+        "description": "Acesso rápido a todos os comandos principais do OpenBase.",
         "category": "OpenBase"
       },
       {
         "command": "openbase.newProject",
         "title": "OpenBase: New Project",
+        "description": "Cria um novo projeto OpenBase .NET.",
         "category": "OpenBase"
       },
       {
         "command": "openbase.scaffold",
         "title": "OpenBase: Scaffold",
+        "description": "Gera CRUD completo para uma entidade.",
         "category": "OpenBase"
       },
       {
