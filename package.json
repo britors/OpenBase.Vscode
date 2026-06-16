@@ -147,6 +147,11 @@
     },
     "commands": [
       {
+        "command": "openbase.quickAccess",
+        "title": "OpenBase: Quick Access",
+        "category": "OpenBase"
+      },
+      {
         "command": "openbase.newProject",
         "title": "OpenBase: New Project",
         "category": "OpenBase"

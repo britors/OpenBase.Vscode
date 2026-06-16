@@ -7417,18 +7417,24 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
-    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    item.command = 'openbase.sqlRunner';
-    context.subscriptions.push(item);
+    const connItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    connItem.command = 'openbase.sqlRunner';
+    
+    const activeItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
+    activeItem.text = '$(rocket) OpenBase';
+    activeItem.tooltip = 'OpenBase CLI is active';
+    activeItem.show();
+
+    context.subscriptions.push(connItem, activeItem);
 
     function refresh(): void {
         const folder = vscode.workspace.workspaceFolders?.[0];
-        if (!folder) { item.hide(); return; }
+        if (!folder) { connItem.hide(); return; }
         const conn = findConnection(folder.uri.fsPath);
-        if (!conn) { item.hide(); return; }
-        item.text = `$(database) ${conn.label}`;
-        item.tooltip = undefined;
-        item.show();
+        if (!conn) { connItem.hide(); return; }
+        connItem.text = `$(database) ${conn.label}`;
+        connItem.tooltip = undefined;
+        connItem.show();
     }
 
     context.subscriptions.push(
@@ -7528,6 +7534,26 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.monitor', () => monitor()),
         vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
         vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
+        vscode.commands.registerCommand('openbase.quickAccess', async () => {
+            const commands = [
+                { label: 'New Project', command: 'openbase.newProject' },
+                { label: 'Scaffold', command: 'openbase.scaffold' },
+                { label: 'Specialist', command: 'openbase.specialist' },
+                { label: 'SQL Runner', command: 'openbase.sqlRunner' },
+                { label: 'HTTP Runner', command: 'openbase.httpRunner' },
+                { label: 'Migration Runner', command: 'openbase.migrationRunner' },
+                { label: 'Monitor', command: 'openbase.monitor' },
+            ];
+            const selection = await vscode.window.showQuickPick(commands.map(c => c.label), {
+                placeHolder: 'Select an OpenBase command'
+            });
+            if (selection) {
+                const cmd = commands.find(c => c.label === selection);
+                if (cmd) {
+                    vscode.commands.executeCommand(cmd.command);
+                }
+            }
+        }),
         reg('openbase.newProject',     newProject),
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
