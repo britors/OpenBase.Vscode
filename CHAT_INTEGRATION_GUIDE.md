@@ -49,6 +49,7 @@ Here are various ways to interact with the assistant, categorized by workflow ty
 ### Project Management & Scaffolding
 - **Create Project:** `"@openbase create new project"`
 - **Scaffold Feature:** `"@openbase scaffold user-management feature"`
+- **Implement Issue:** `"@openbase implemente a issue #feature/123"` (Triggers automated workflow based on type)
 - **Extensions:** `"@openbase add extension auth"`
 
 ### Context-Aware & Agentic Workflows
