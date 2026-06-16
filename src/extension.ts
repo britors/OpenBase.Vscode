@@ -7826,8 +7826,6 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
         }
         connItem.show();
     }
-        connItem.show();
-    }
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeWorkspaceFolders(refresh),
