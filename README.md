@@ -6,6 +6,15 @@
 
 VS Code extension that exposes [OpenBase CLI](https://github.com/britors/OpenBase.CLI) commands directly from the editor.
 
+## Funcionalidades Principais
+
+*   **Copilot Chat Integration**: Interaja com o OpenBase via `@openbase` no chat (ex: `@openbase implemente a issue #feature/123`).
+*   **Quick Access**: Acesso rápido a todos os comandos via `OpenBase: Quick Access` na Paleta de Comandos.
+*   **Status Bar**: Indicador de atividade na barra de status inferior.
+*   **Walkthrough**: Tutorial interativo para novos usuários ("Começando com OpenBase").
+*   **Runners Integrados**: SQL Runner (com ER Diagram), HTTP Runner (com suporte a env vars), Migration Runner.
+*   **Exploradores**: Solution Explorer e Dependency Inspector (com atualização automática).
+
 ## Prerequisites
 
 The OpenBase CLI must be installed globally:
@@ -36,54 +45,37 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 
 | Command | Description |
 |---|---|
-| OpenBase: Quick Access | Open access to all primary OpenBase commands |
-| `OpenBase: New Project` † | Create a new OpenBase project |
-
-| `OpenBase: Scaffold` † | Generate full CRUD for an entity |
-| `OpenBase: Scaffold Update` † | Update scaffold files from current DB schema |
-| `OpenBase: Specialist` † | Generate specialist methods for an entity |
-| `OpenBase: Procedure` † | Generate a stored procedure wrapper |
-| `OpenBase: Add Extension` † | Add an extension (JWT, Cache, Health Checks) |
-| `OpenBase: List Extensions` | List available extensions |
-| `OpenBase: Build` | Build the project (Debug or Release) |
-| `OpenBase: Debug` | Build (Debug) and launch the VS Code debugger |
-| `OpenBase: Run` | Run the project |
-| `OpenBase: Update CLI` | Update OpenBase CLI to the latest version |
-| `OpenBase: History` | Show command history |
-| `OpenBase: Version` | Show installed CLI version |
+| Quick Access | Open access to all primary OpenBase commands |
+| New Project † | Create a new OpenBase project |
+| Scaffold † | Generate full CRUD for an entity |
+| Scaffold Update † | Update scaffold files from current DB schema |
+| Specialist † | Generate specialist methods for an entity |
+| Procedure † | Generate a stored procedure wrapper |
+| Add Extension † | Add an extension (JWT, Cache, Health Checks) |
+| List Extensions | List available extensions |
+| Build | Build the project (Debug or Release) |
+| Debug | Build (Debug) and launch the VS Code debugger |
+| Run | Run the project |
+| Update CLI | Update OpenBase CLI to the latest version |
+| History | Show command history |
+| Version | Show installed CLI version |
+| SQL Runner | Open SQL Runner |
+| HTTP Runner | Open HTTP Runner |
+| Monitor | Open Monitor |
 
 ## Usage
 
+### Copilot Chat
+Use `@openbase` no painel do GitHub Copilot Chat para interagir.
+Exemplo: `@openbase implemente a issue #feature/101`
+
 ### New Project
-
-1. Open the Command Palette (`Ctrl+Shift+P`) → **OpenBase: New Project**
-2. Fill in the project name, database template, server, credentials and optional license keys
-3. Select the destination folder (skipped if a single workspace is open)
-4. The output panel opens and shows the progress of `openbase new`
-5. When done, choose to open the created folder in the current window or a new one
-
-### Scaffold
-
-1. Open the Command Palette → **OpenBase: Scaffold**
-2. Enter the entity name in PascalCase (e.g. `Product`)
-3. The CLI runs interactively in the terminal (code-first or model-first)
+1. Open the Command Palette (`Ctrl+Shift+P`) → **New Project**
+2. Fill in the details and follow the instructions in the output panel.
 
 ### Debug
-
-1. Open the Command Palette → **OpenBase: Debug** (or use the **Debug** tab in the sidebar panel)
-2. Select the configuration (`Debug` or `Release`) and optionally skip the build step
-3. The extension builds the project with `openbase build`, locates the API `.csproj` to resolve the output DLL, then starts the VS Code debugger (`coreclr`)
-4. Breakpoints in the API project are hit normally; the browser opens automatically when the app is ready
-
-> Requires the **C# Dev Kit** or **C# (OmniSharp)** extension installed in VS Code.
-
-### Status Bar Indicator
-
-When the OpenBase extension is active, you will see a `$(rocket) OpenBase` indicator in the VS Code status bar. Clicking it provides quick access to create a new project.
-
-## Quick Access
-
-Use the `OpenBase: Quick Access` command from the Command Palette to bring up a menu of all primary OpenBase commands.
+1. Open the Command Palette → **Debug** (or use the **Solution Explorer** sidebar).
+2. Requires **C# Dev Kit** or **C# (OmniSharp)**.
 
 ## Development
 
@@ -108,4 +100,3 @@ Every push to `main` automatically publishes a new version to the VS Code Market
 ## Related
 
 - [OpenBase CLI](https://github.com/britors/OpenBase.CLI) — the underlying CLI tool
-- [OpenBase VS extension](https://github.com/britors/OpenBase.CLI/issues/110) — Visual Studio 2025 extension (planned)
