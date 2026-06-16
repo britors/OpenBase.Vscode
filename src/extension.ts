@@ -2035,6 +2035,7 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
 <div id="history-panel" class="hidden">
   <div class="history-toolbar">
     <span>Query history</span>
+    <input id="history-filter" type="text" placeholder="Filter history..." style="font-size:11px;padding:2px 5px;margin-left:auto;width:120px">
     <button id="clear-history-btn" class="btn btn-secondary" style="font-size:11px;padding:2px 8px">Clear all</button>
   </div>
   <div id="history-list"><p class="history-empty">No history yet.</p></div>
@@ -2079,6 +2080,14 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   });
   document.getElementById('history-btn').addEventListener('click', function() {
     toggleHistory();
+  });
+  document.getElementById('history-filter').addEventListener('input', function(e) {
+    var filter = e.target.value.toLowerCase();
+    var items = document.querySelectorAll('.history-item');
+    items.forEach(function(item) {
+        var text = item.textContent.toLowerCase();
+        item.classList.toggle('hidden', text.indexOf(filter) === -1);
+    });
   });
   document.getElementById('clear-history-btn').addEventListener('click', function() {
     vscode.postMessage({ command: 'clearHistory' });
