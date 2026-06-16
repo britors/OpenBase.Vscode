@@ -1,0 +1,6 @@
+{
+  "name": "Local",
+  "variables": {
+    "LOCAL_URL": "https://localhost:7215"
+  }
+}

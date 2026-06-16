@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.7.6",
+  "version": "10.10.1",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -24,7 +24,9 @@
             "id": "new-project",
             "title": "Criar Projeto",
             "description": "Aprenda a usar o comando 'OpenBase: New Project'.",
-            "media": { "markdown": "walkthroughs/welcome.md" }
+            "media": {
+              "markdown": "walkthroughs/welcome.md"
+            }
           }
         ]
       }
@@ -73,10 +75,31 @@
           "id": "openbase-solutionexplorer",
           "title": "OpenBase Solution Explorer",
           "icon": "icon-solutionexplorer.svg"
+        },
+        {
+          "id": "openbase-taskrunner",
+          "title": "OpenBase Task Runner",
+          "icon": "$(issues)"
         }
       ]
     },
+    "configuration": {
+      "title": "OpenBase",
+      "properties": {
+        "openbase.editor.autoSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save SQL scripts and HTTP requests while editing."
+        }
+      }
+    },
     "views": {
+      "openbase-taskrunner": [
+        {
+          "id": "openbase.taskrunner.tree",
+          "name": "GitHub Issues"
+        }
+      ],
       "openbase": [
         {
           "type": "webview",
@@ -503,6 +526,30 @@
         "title": "Publish",
         "category": "OpenBase",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "openbase.taskRunner.refresh",
+        "title": "Refresh",
+        "category": "OpenBase",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openbase.taskRunner.openInBrowser",
+        "title": "Open in Browser",
+        "category": "OpenBase",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "openbase.taskRunner.develop",
+        "title": "Create Branch",
+        "category": "OpenBase",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "openbase.taskRunner.toSpecialist",
+        "title": "Send to Specialist",
+        "category": "OpenBase",
+        "icon": "$(arrow-right)"
       }
     ],
     "keybindings": [
@@ -526,6 +573,11 @@
     "menus": {
       "commandPalette": [],
       "view/title": [
+        {
+          "command": "openbase.taskRunner.refresh",
+          "when": "view == openbase.taskrunner.tree",
+          "group": "navigation"
+        },
         {
           "command": "openbase.sqlRunner",
           "when": "view == openbase.panel",
@@ -663,6 +715,21 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "openbase.taskRunner.openInBrowser",
+          "when": "view == openbase.taskrunner.tree && viewItem == task",
+          "group": "inline@1"
+        },
+        {
+          "command": "openbase.taskRunner.develop",
+          "when": "view == openbase.taskrunner.tree && viewItem == task",
+          "group": "inline@2"
+        },
+        {
+          "command": "openbase.taskRunner.toSpecialist",
+          "when": "view == openbase.taskrunner.tree && viewItem == task",
+          "group": "inline@3"
+        },
         {
           "command": "openbase.sqlRunner.tables.select",
           "when": "view == openbase.sqlrunner.tables && viewItem == table",

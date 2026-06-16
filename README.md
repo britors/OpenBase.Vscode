@@ -2,7 +2,6 @@
 
 ![OpenBase for VS Code](https://raw.githubusercontent.com/britors/OpenBase.Vscode/main/banner.png)
 
-![Publish](https://github.com/britors/OpenBase.Vscode/actions/workflows/publish.yml/badge.svg)
 
 VS Code extension that exposes [OpenBase CLI](https://github.com/britors/OpenBase.CLI) commands directly from the editor.
 
@@ -67,6 +66,15 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 
 ### Copilot Chat
 Use `@openbase` no painel do GitHub Copilot Chat para interagir.
+Comandos suportados incluem:
+- `migrate`: Executa migrações pendentes.
+- `build` / `run`: Compila ou executa a solução.
+- `test`: Executa os testes do projeto.
+- `sql` / `http` / `log` / `monitor`: Abre as ferramentas integradas.
+- `scaffold` / `new project`: Inicia assistentes de geração de código.
+- `context`: Mostra o contexto do arquivo atual.
+- `implemente a issue #tipo/id`: Fluxo automatizado para resolução de issues.
+
 Exemplo: `@openbase implemente a issue #feature/101`
 
 ### New Project
