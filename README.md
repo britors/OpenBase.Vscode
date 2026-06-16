@@ -36,7 +36,9 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 
 | Command | Description |
 |---|---|
+| OpenBase: Quick Access | Open access to all primary OpenBase commands |
 | `OpenBase: New Project` † | Create a new OpenBase project |
+
 | `OpenBase: Scaffold` † | Generate full CRUD for an entity |
 | `OpenBase: Scaffold Update` † | Update scaffold files from current DB schema |
 | `OpenBase: Specialist` † | Generate specialist methods for an entity |
@@ -75,11 +77,13 @@ All commands are available via the **Command Palette** (`Ctrl+Shift+P`). Command
 
 > Requires the **C# Dev Kit** or **C# (OmniSharp)** extension installed in VS Code.
 
-### Add Extension
+### Status Bar Indicator
 
-1. Open the Command Palette → **OpenBase: Add Extension**
-2. Select the extension type (`jwt`, `cache`, `healthchecks`)
-3. If applicable, select the provider (e.g. `redis` for cache)
+When the OpenBase extension is active, you will see a `$(rocket) OpenBase` indicator in the VS Code status bar. Clicking it provides quick access to create a new project.
+
+## Quick Access
+
+Use the `OpenBase: Quick Access` command from the Command Palette to bring up a menu of all primary OpenBase commands.
 
 ## Development
 
