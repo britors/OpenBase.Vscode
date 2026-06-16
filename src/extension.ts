@@ -7798,18 +7798,24 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
     activeItem.tooltip = 'OpenBase CLI';
     activeItem.show();
 
-    context.subscriptions.push(connItem, activeItem);
+    const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 102);
+    statusItem.text = '$(sync~spin) OpenBase: Idle';
+    statusItem.show();
+
+    context.subscriptions.push(connItem, activeItem, statusItem);
 
     function refresh(): void {
         const folder = vscode.workspace.workspaceFolders?.[0];
         if (!folder) { 
             connItem.hide(); 
             activeItem.text = '$(rocket) OpenBase (No project)';
+            statusItem.text = '$(error) OpenBase: Inactive';
             return; 
         }
-        
+
         activeItem.text = `$(rocket) OpenBase: ${path.basename(folder.uri.fsPath)}`;
-        
+        statusItem.text = '$(check) OpenBase: Ready';
+
         const conn = findConnection(folder.uri.fsPath);
         if (!conn) { 
             connItem.text = '$(database) No Connection';
@@ -7818,6 +7824,8 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
             connItem.text = `$(database) ${conn.label}`;
             connItem.tooltip = `Connected to: ${conn.server}/${conn.database}`;
         }
+        connItem.show();
+    }
         connItem.show();
     }
 
