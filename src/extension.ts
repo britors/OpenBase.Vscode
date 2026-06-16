@@ -79,6 +79,7 @@ async function guardInstalled(): Promise<boolean> {
 
 let panelProvider: OpenBasePanelProvider | undefined;
 let extContext: vscode.ExtensionContext | undefined;
+let diagnosticCollection: vscode.DiagnosticCollection;
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
@@ -595,6 +596,10 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ command: 'navigateTo', tab, query });
     }
 
+    postMessage(msg: any): void {
+        this._view?.webview.postMessage(msg);
+    }
+
     private async _handle(msg: { command: string; data?: Record<string, string | boolean> }, view: vscode.WebviewView): Promise<void> {
         if (msg.command === 'pickFolder') {
             const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select folder' });
@@ -762,17 +767,58 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         return picked?.[0]?.fsPath;
     }
 
+    private _parseDiagnostics(output: string, cwd: string) {
+        const diagnostics: { [uri: string]: vscode.Diagnostic[] } = {};
+        const regex = /^(.+)\((\d+),(\d+)\): (error|warning) ([\w\d]+): (.*)$/gm;
+        let match;
+
+        while ((match = regex.exec(output)) !== null) {
+            const [ , file, line, col, severityStr, code, message ] = match;
+            const absolutePath = path.isAbsolute(file) ? file : path.resolve(cwd, file);
+            const uri = vscode.Uri.file(absolutePath).toString();
+            
+            const range = new vscode.Range(
+                parseInt(line) - 1, 
+                parseInt(col) - 1, 
+                parseInt(line) - 1, 
+                parseInt(col) + 100
+            );
+
+            const severity = severityStr === 'error' ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning;
+            const diagnostic = new vscode.Diagnostic(range, `${code}: ${message}`, severity);
+            diagnostic.source = 'OpenBase';
+            diagnostic.code = code;
+
+            if (!diagnostics[uri]) diagnostics[uri] = [];
+            diagnostics[uri].push(diagnostic);
+        }
+
+        for (const uri in diagnostics) {
+            diagnosticCollection.set(vscode.Uri.parse(uri), diagnostics[uri]);
+        }
+    }
+
     private async _exec(cmd: string, cwd: string, view: vscode.WebviewView, ctx: string, channelName: string): Promise<boolean> {
         const channel = this._channel(channelName);
         channel.clear();
         channel.show(true);
+        diagnosticCollection.clear();
+
+        let fullOutput = '';
         const extraPath = dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         return new Promise<boolean>((resolve) => {
             const child = exec(cmd, { cwd, env, timeout: 60000 });
-            child.stdout?.on('data', (chunk: string) => channel.append(chunk));
-            child.stderr?.on('data', (chunk: string) => channel.append(chunk));
+            child.stdout?.on('data', (chunk: string) => {
+                channel.append(chunk);
+                fullOutput += chunk;
+            });
+            child.stderr?.on('data', (chunk: string) => {
+                channel.append(chunk);
+                fullOutput += chunk;
+            });
             child.on('close', (code, signal) => {
+                this._parseDiagnostics(fullOutput, cwd);
                 if (signal === 'SIGTERM') {
                     view.webview.postMessage({ command: 'error', ctx, text: 'Command timed out after 60s.' });
                     resolve(false);
@@ -1087,6 +1133,13 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
             spEditorPending = m.query;
           }
         }
+        return;
+      }
+      if (m.command === 'fillSpecialist') {
+        var navEl = document.querySelector('.nav-item[data-page="sp"]');
+        if (navEl) nav(navEl, 'sp');
+        if (m.entity) document.getElementById('sp-entity').value = m.entity;
+        if (m.method) document.getElementById('sp-method').value = m.method;
         return;
       }
       if (m.command === 'loadNewProjectPrefs') {
@@ -1408,6 +1461,8 @@ function getNonce(): string {
 const NEW_PROJECT_PREFS_KEY = 'newProjectPrefs';
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
+const SQL_AUTOSAVE_KEY = 'sqlRunnerAutoSave';
+const HTTP_AUTOSAVE_KEY = 'httpRunnerAutoSave';
 const HTTP_HISTORY_KEY = 'httpCallHistory';
 const HTTP_HISTORY_LIMIT = 100;
 const HTTP_ENVS_SUBDIR = path.join('.openbase', 'http-runner', 'envs');
@@ -1589,8 +1644,21 @@ async function sqlRunner(): Promise<void> {
     const sqlNonce = getNonce();
     sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
 
+    const savedSql = extContext?.globalState.get<string>(SQL_AUTOSAVE_KEY);
+    if (savedSql && !sqlPendingScript) {
+        sqlPendingScript = { content: savedSql, name: 'autosave' };
+    }
+
     sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string; table?: string; keyColumn?: string; keyValue?: string; column?: string; newValue?: string }) => {
         sqlOut().appendLine(`[SQL Runner] Message received: ${msg.command}`);
+
+        if (msg.command === 'autoSave' && msg.sql) {
+            const autoSaveEnabled = vscode.workspace.getConfiguration('openbase').get('editor.autoSave', true);
+            if (autoSaveEnabled) {
+                await extContext?.globalState.update(SQL_AUTOSAVE_KEY, msg.sql);
+            }
+            return;
+        }
 
         if (msg.command === 'ready') {
             if (sqlPendingScript) {
@@ -1854,7 +1922,34 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
   td.null{color:var(--vscode-descriptionForeground);font-style:italic}
   td.editing{padding:0!important}
   .cell-edit-input{width:100%;height:100%;background:var(--ob-bg2,#1c1535);color:var(--ob-text,#ede8f8);border:1px solid var(--ob-purple,#b44fff)!important;font-size:12px;font-family:inherit;padding:3px 8px;outline:none}
-  :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
+  :root{
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-bg1: var(--vscode-sideBar-background);
+    --ob-bg2: var(--vscode-input-background);
+    --ob-purple: #b44fff;
+    --ob-pink: #ff3fa4;
+    --ob-border: var(--vscode-panel-border);
+    --ob-text: var(--vscode-foreground);
+    --ob-dim: var(--vscode-descriptionForeground);
+  }
+  body.vscode-dark {
+    --ob-bg0: #0d0f1a;
+    --ob-bg1: #131629;
+    --ob-bg2: #1c1535;
+    --ob-border: rgba(180,79,255,0.22);
+    --ob-text: #ede8f8;
+    --ob-dim: #9080b8;
+  }
+  body.vscode-light {
+    --ob-bg0: #fdfdff;
+    --ob-bg1: #f1f3f9;
+    --ob-bg2: #ffffff;
+    --ob-purple: #7b2cbf;
+    --ob-pink: #d81b60;
+    --ob-border: #e0e4ef;
+    --ob-text: #24292e;
+    --ob-dim: #6a737d;
+  }
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   .header{background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10))!important;border-bottom:1px solid var(--ob-border)!important}
   .header-title{background:linear-gradient(90deg,var(--ob-purple),var(--ob-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
@@ -2146,6 +2241,9 @@ function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string, cspSo
       contextmenu: false,
     });
     editor.addCommand(monaco.KeyCode.F8, function() { run(); });
+    editor.onDidChangeModelContent(function() {
+      vscode.postMessage({ command: 'autoSave', sql: editor.getValue() });
+    });
     document.getElementById('editor-loading').style.display = 'none';
     if (pendingLoad !== null) {
       editor.setValue(pendingLoad);
@@ -2780,7 +2878,34 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   @keyframes spin{to{transform:rotate(360deg)}}
 
   /* ── OpenBase brand theme ── */
-  :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-bg2:#1c1535;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
+  :root{
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-bg1: var(--vscode-sideBar-background);
+    --ob-bg2: var(--vscode-input-background);
+    --ob-purple: #b44fff;
+    --ob-pink: #ff3fa4;
+    --ob-border: var(--vscode-panel-border);
+    --ob-text: var(--vscode-foreground);
+    --ob-dim: var(--vscode-descriptionForeground);
+  }
+  body.vscode-dark {
+    --ob-bg0: #0d0f1a;
+    --ob-bg1: #131629;
+    --ob-bg2: #1c1535;
+    --ob-border: rgba(180,79,255,0.22);
+    --ob-text: #ede8f8;
+    --ob-dim: #9080b8;
+  }
+  body.vscode-light {
+    --ob-bg0: #fdfdff;
+    --ob-bg1: #f1f3f9;
+    --ob-bg2: #ffffff;
+    --ob-purple: #7b2cbf;
+    --ob-pink: #d81b60;
+    --ob-border: #e0e4ef;
+    --ob-text: #24292e;
+    --ob-dim: #6a737d;
+  }
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   input,select,textarea{background:var(--ob-bg2)!important;color:var(--ob-text)!important;border-color:var(--ob-border)!important}
   input:focus,select:focus,textarea:focus{border-color:var(--ob-purple)!important}
@@ -3065,6 +3190,27 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   });
   document.querySelectorAll('#res-tab-strip .tab').forEach(function(tab) {
     tab.addEventListener('click', function() { resTab(this, this.getAttribute('data-tab')); });
+  });
+
+  function triggerAutoSave() {
+    vscode.postMessage({
+      command: 'autoSaveHttp',
+      data: {
+        method: document.getElementById('method').value,
+        url: document.getElementById('url-input').value,
+        headers: collectHeadersArray(),
+        bodyType: document.getElementById('body-type').value,
+        body: document.getElementById('body-text').value,
+        authToken: document.getElementById('auth-token').value
+      }
+    });
+  }
+  ['url-input', 'method', 'body-type', 'body-text', 'auth-token'].forEach(function(id) {
+    document.getElementById(id).addEventListener('input', triggerAutoSave);
+  });
+  document.getElementById('headers-list').addEventListener('input', triggerAutoSave);
+  document.getElementById('headers-list').addEventListener('click', function(e) {
+    if (e.target.classList.contains('btn-ghost')) setTimeout(triggerAutoSave, 10);
   });
 
   var NO_BODY_METHODS = ['GET','HEAD','OPTIONS'];
@@ -3978,12 +4124,18 @@ function buildTableInspectorLoadingHtml(nonce: string, cspSource: string, schema
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
-.spinner{width:30px;height:30px;border:3px solid rgba(180,79,255,.2);border-top-color:#b44fff;border-radius:50%;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.name{background:linear-gradient(90deg,#b44fff,#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
-.lbl{color:#444;font-size:11px}
+  :root {
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-purple: #b44fff;
+  }
+  body.vscode-dark { --ob-bg0: #0d0f1a; }
+  body.vscode-light { --ob-bg0: #fdfdff; --ob-purple: #7b2cbf; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--ob-bg0);color:var(--vscode-foreground);font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
+  .spinner{width:30px;height:30px;border:3px solid rgba(180,79,255,.2);border-top-color:var(--ob-purple);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .name{background:linear-gradient(90deg,var(--ob-purple),#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
+  .lbl{color:var(--vscode-descriptionForeground);font-size:11px}
 </style>
 </head>
 <body>
@@ -4002,11 +4154,26 @@ function buildTableInspectorErrorHtml(nonce: string, cspSource: string, schema: 
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px;padding:24px;text-align:center}
-.icon{font-size:30px}
-.name{background:linear-gradient(90deg,#b44fff,#ff3fa4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
-.err{background:#150a0a;border:1px solid rgba(255,107,107,.3);color:#ff6b6b;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:12px;max-width:480px;word-break:break-word}
+  :root{
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-text: var(--vscode-foreground);
+    --ob-purple: #b44fff;
+    --ob-pink: #ff3fa4;
+  }
+  body.vscode-dark {
+    --ob-bg0: #0d0f1a;
+    --ob-text: #e8e8f0;
+  }
+  body.vscode-light {
+    --ob-bg0: #fdfdff;
+    --ob-text: #24292e;
+    --ob-purple: #7b2cbf;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--ob-bg0);color:var(--ob-text);font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px;padding:24px;text-align:center}
+  .icon{font-size:30px}
+  .name{background:linear-gradient(90deg,var(--ob-purple),var(--ob-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700;font-size:14px}
+  .err{background:rgba(255,107,107,0.05);border:1px solid rgba(255,107,107,.3);color:#ff6b6b;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:12px;max-width:480px;word-break:break-word}
 </style>
 </head>
 <body>
@@ -4026,11 +4193,17 @@ function buildErDiagramLoadingHtml(nonce: string, cspSource: string): string {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
-.spinner{width:32px;height:32px;border:3px solid rgba(180,79,255,.2);border-top-color:#b44fff;border-radius:50%;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.lbl{color:#666;font-size:12px}
+  :root {
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-purple: #b44fff;
+  }
+  body.vscode-dark { --ob-bg0: #0d0f1a; }
+  body.vscode-light { --ob-bg0: #fdfdff; --ob-purple: #7b2cbf; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--ob-bg0);color:var(--vscode-foreground);font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px}
+  .spinner{width:32px;height:32px;border:3px solid rgba(180,79,255,.2);border-top-color:var(--ob-purple);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .lbl{color:var(--vscode-descriptionForeground);font-size:12px}
 </style>
 </head>
 <body>
@@ -4051,20 +4224,46 @@ function buildErDiagramHtml(nonce: string, cspSource: string, tables: ErTableDat
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; img-src data: blob:;">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden;background:#0d0f1a;color:#e8e8f0;font-family:'Segoe UI',sans-serif;font-size:13px}
-.toolbar{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #1e2035;flex-shrink:0;background:#111328}
-.toolbar label{color:#888;font-size:11px}
-select{background:#1a1c2e;color:#e8e8f0;border:1px solid #2a2d45;border-radius:4px;padding:3px 6px;font-size:12px;font-family:inherit;cursor:pointer}
-.btn{padding:3px 10px;border:1px solid #2a2d45;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;background:#1a1c2e;color:#e8e8f0}
-.btn:hover{background:#23263d;border-color:#b44fff}
-.sep{width:1px;height:18px;background:#1e2035;margin:0 2px}
-.wrap{flex:1;overflow:hidden;position:relative;cursor:grab}
-.wrap.dragging{cursor:grabbing}
-#diagram{position:absolute;top:0;left:0;transform-origin:0 0;padding:20px}
-#diagram svg{display:block}
-.hint{color:#444;font-size:11px;margin-left:auto}
-.count{color:#666;font-size:11px}
+  :root {
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-bg1: var(--vscode-sideBar-background);
+    --ob-bg2: var(--vscode-input-background);
+    --ob-purple: #b44fff;
+    --ob-border: var(--vscode-panel-border);
+    --ob-text: var(--vscode-foreground);
+    --ob-dim: var(--vscode-descriptionForeground);
+  }
+  body.vscode-dark {
+    --ob-bg0: #0d0f1a;
+    --ob-bg1: #111328;
+    --ob-bg2: #1a1c2e;
+    --ob-border: #1e2035;
+    --ob-text: #e8e8f0;
+    --ob-dim: #888;
+  }
+  body.vscode-light {
+    --ob-bg0: #fdfdff;
+    --ob-bg1: #f1f3f9;
+    --ob-bg2: #ffffff;
+    --ob-purple: #7b2cbf;
+    --ob-border: #e0e4ef;
+    --ob-text: #24292e;
+    --ob-dim: #6a737d;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--ob-bg0);color:var(--ob-text);font-family:'Segoe UI',sans-serif;font-size:13px}
+  .toolbar{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--ob-border);flex-shrink:0;background:var(--ob-bg1)}
+  .toolbar label{color:var(--ob-dim);font-size:11px}
+  select{background:var(--ob-bg2);color:var(--ob-text);border:1px solid var(--ob-border);border-radius:4px;padding:3px 6px;font-size:12px;font-family:inherit;cursor:pointer}
+  .btn{padding:3px 10px;border:1px solid var(--ob-border);border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;background:var(--ob-bg2);color:var(--ob-text)}
+  .btn:hover{background:var(--ob-bg1);border-color:var(--ob-purple)}
+  .sep{width:1px;height:18px;background:var(--ob-border);margin:0 2px}
+  .wrap{flex:1;overflow:hidden;position:relative;cursor:grab}
+  .wrap.dragging{cursor:grabbing}
+  #diagram{position:absolute;top:0;left:0;transform-origin:0 0;padding:20px}
+  #diagram svg{display:block}
+  .hint{color:var(--ob-dim);font-size:11px;margin-left:auto}
+  .count{color:var(--ob-dim);font-size:11px}
 </style>
 </head>
 <body style="display:flex;flex-direction:column">
@@ -6235,7 +6434,34 @@ function buildMigrationScriptHtml(nonce: string, cspSource: string): string {
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%;display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);background:var(--vscode-editor-background);color:var(--vscode-foreground)}
-  :root{--ob-bg0:#0d0f1a;--ob-bg1:#131629;--ob-purple:#b44fff;--ob-pink:#ff3fa4;--ob-border:rgba(180,79,255,.22);--ob-text:#ede8f8;--ob-dim:#9080b8}
+  :root{
+    --ob-bg0: var(--vscode-editor-background);
+    --ob-bg1: var(--vscode-sideBar-background);
+    --ob-bg2: var(--vscode-input-background);
+    --ob-purple: #b44fff;
+    --ob-pink: #ff3fa4;
+    --ob-border: var(--vscode-panel-border);
+    --ob-text: var(--vscode-foreground);
+    --ob-dim: var(--vscode-descriptionForeground);
+  }
+  body.vscode-dark {
+    --ob-bg0: #0d0f1a;
+    --ob-bg1: #131629;
+    --ob-bg2: #1c1535;
+    --ob-border: rgba(180,79,255,0.22);
+    --ob-text: #ede8f8;
+    --ob-dim: #9080b8;
+  }
+  body.vscode-light {
+    --ob-bg0: #fdfdff;
+    --ob-bg1: #f1f3f9;
+    --ob-bg2: #ffffff;
+    --ob-purple: #7b2cbf;
+    --ob-pink: #d81b60;
+    --ob-border: #e0e4ef;
+    --ob-text: #24292e;
+    --ob-dim: #6a737d;
+  }
   html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
   .header{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--ob-border);background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10));flex-shrink:0}
   .header-title{font-weight:600;font-size:13px;background:linear-gradient(90deg,var(--ob-purple),var(--ob-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
@@ -7414,6 +7640,128 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
     );
 }
 
+// ─── task runner ─────────────────────────────────────────────────────────────
+
+class TaskItem extends vscode.TreeItem {
+    constructor(
+        public readonly number: number,
+        public readonly title: string,
+        public readonly labels: string[],
+        public readonly milestone: string | null,
+        public readonly assignees: string[]
+    ) {
+        super(`[#${number}] ${title}`, vscode.TreeItemCollapsibleState.None);
+        this.tooltip = `Issue #${number}: ${title}\nLabels: ${labels.join(', ')}\nMilestone: ${milestone ?? 'None'}\nAssignees: ${assignees.join(', ')}`;
+        this.contextValue = 'task';
+        this.iconPath = new vscode.ThemeIcon('issues');
+    }
+}
+
+class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<TaskItem | undefined | void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    constructor(private readonly cwd: string) {}
+
+    refresh(): void {
+        this._onDidChangeTreeData.fire();
+    }
+
+    getTreeItem(element: TaskItem): vscode.TreeItem {
+        return element;
+    }
+
+    async getChildren(element?: TaskItem): Promise<TaskItem[]> {
+        if (element) return [];
+
+        return new Promise((resolve) => {
+            const extraPath = dotnetToolsPath();
+            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+            exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, stdout) => {
+                if (err) {
+                    console.error('Error fetching issues:', err);
+                    resolve([]);
+                    return;
+                }
+                try {
+                    const issues = JSON.parse(stdout);
+                    resolve(issues.map((i: any) => new TaskItem(
+                        i.number,
+                        i.title,
+                        i.labels.map((l: any) => l.name),
+                        i.milestone?.title || null,
+                        i.assignees.map((a: any) => a.login)
+                    )));
+                } catch (e) {
+                    console.error('Error parsing issues:', e);
+                    resolve([]);
+                }
+            });
+        });
+    }
+}
+
+let taskProvider: TaskProvider | undefined;
+
+function setupTaskRunner(context: vscode.ExtensionContext): void {
+    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!rootPath) return;
+
+    taskProvider = new TaskProvider(rootPath);
+    vscode.window.registerTreeDataProvider('openbase.taskrunner.tree', taskProvider);
+
+    const reg = (id: string, fn: (...args: any[]) => any) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+
+    reg('openbase.taskRunner.refresh', () => taskProvider?.refresh());
+
+    reg('openbase.taskRunner.openInBrowser', (item: TaskItem) => {
+        if (!item) return;
+        const extraPath = dotnetToolsPath();
+        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+        exec(`gh issue view ${item.number} --web`, { cwd: rootPath, env });
+    });
+
+    reg('openbase.taskRunner.develop', (item: TaskItem) => {
+        if (!item) return;
+        const terminal = vscode.window.createTerminal({
+            name: `OpenBase: Issue #${item.number}`,
+            cwd: rootPath,
+            env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
+        });
+        terminal.show();
+        terminal.sendText(`gh issue develop ${item.number}`);
+    });
+
+    reg('openbase.taskRunner.toSpecialist', (item: TaskItem) => {
+        if (!item) return;
+        
+        let entity = '';
+        let method = '';
+        
+        const m1 = item.title.match(/Add\s+(\w+)\s+to\s+(\w+)/i);
+        if (m1) {
+            method = m1[1];
+            entity = m1[2];
+        } else {
+            const words = item.title.split(' ');
+            if (words.length >= 2) {
+                method = words[0];
+                entity = words[words.length - 1];
+            }
+        }
+
+        vscode.commands.executeCommand('openbase.specialist');
+        
+        setTimeout(() => {
+            panelProvider?.postMessage({
+                command: 'fillSpecialist',
+                entity,
+                method
+            });
+        }, 1000);
+    });
+}
+
 // ─── status bar ──────────────────────────────────────────────────────────────
 
 function setupStatusBar(context: vscode.ExtensionContext): void {
@@ -7449,6 +7797,8 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
 
 export function activate(context: vscode.ExtensionContext): void {
     extContext = context;
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('openbase');
+    context.subscriptions.push(diagnosticCollection);
     panelProvider = new OpenBasePanelProvider();
     setupStatusBar(context);
     setupSqlTableBrowser(context);
@@ -7458,6 +7808,7 @@ export function activate(context: vscode.ExtensionContext): void {
     setupDepInspector(context);
     setupEndpointsMap(context);
     setupSolutionExplorer(context);
+    setupTaskRunner(context);
 
     // Helper to execute commands
     const execute = async (command: string, message: string, stream: any) => {
@@ -7483,7 +7834,57 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
         }
 
-        // ... (rest of the existing logic)
+        if (prompt.includes('migrate') || prompt.includes('run migrations')) {
+            await execute('openbase.migrationRunner.migrateUp', 'Running database migrations...', stream);
+        } else if (prompt.includes('build')) {
+            await execute('openbase.solutionExplorer.buildAll', 'Building solution...', stream);
+        } else if (prompt.includes('run solution') || prompt.includes('run')) {
+            await execute('openbase.solutionExplorer.runAll', 'Running solution...', stream);
+        } else if (prompt.includes('test')) {
+            await execute('openbase.solutionExplorer.test', 'Executing tests...', stream);
+        } else if (prompt.includes('sql') || prompt.includes('database')) {
+            await execute('openbase.sqlRunner', 'Opening SQL Runner...', stream);
+        } else if (prompt.includes('http') || prompt.includes('api')) {
+            await execute('openbase.httpRunner', 'Opening HTTP Runner...', stream);
+        } else if (prompt.includes('log')) {
+            await execute('openbase.logViewer', 'Opening Log Viewer...', stream);
+        } else if (prompt.includes('monitor')) {
+            await execute('openbase.monitor', 'Opening System Monitor...', stream);
+        } else if (prompt.includes('new project')) {
+            await execute('openbase.newProject', 'Starting new project wizard...', stream);
+        } else if (prompt.includes('scaffold')) {
+            await execute('openbase.scaffold', 'Starting scaffold wizard...', stream);
+        } else if (prompt.includes('history')) {
+            await execute('openbase.history', 'Showing project history...', stream);
+        } else if (prompt.includes('version')) {
+            await execute('openbase.version', 'Checking CLI version...', stream);
+        } else if (prompt.includes('add extension')) {
+            await execute('openbase.extensionAdd', 'Adding new extension...', stream);
+        } else if (prompt.includes('context')) {
+            const editor = vscode.window.activeTextEditor;
+            if (editor) {
+                const doc = editor.document;
+                stream.markdown(`Your current context is the file: \`${doc.fileName}\` (${doc.languageId}).`);
+            } else {
+                stream.markdown('No active editor found. Please open a file to see its context.');
+            }
+        } else if (prompt.includes('help')) {
+            stream.markdown('I can help you interact with OpenBase tools. Try commands like:\n\n' +
+                '- `migrate`: Run database migrations\n' +
+                '- `build`: Build the solution\n' +
+                '- `run`: Run the solution\n' +
+                '- `test`: Execute tests\n' +
+                '- `sql`: Open SQL Runner\n' +
+                '- `http`: Open HTTP Runner\n' +
+                '- `log`: Open Log Viewer\n' +
+                '- `monitor`: Open System Monitor\n' +
+                '- `new project`: Start new project wizard\n' +
+                '- `scaffold`: Start scaffold wizard\n' +
+                '- `context`: Show current file context\n' +
+                '- `implemente a issue #tipo/id`: Automated issue workflow');
+        } else {
+            stream.markdown("I'm sorry, I don't recognize that command. Try `@openbase help` to see what I can do.");
+        }
     });
 
     // Handler para implementação de issue

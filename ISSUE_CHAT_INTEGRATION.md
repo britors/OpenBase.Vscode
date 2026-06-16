@@ -32,8 +32,8 @@ Enable OpenBase capabilities within the GitHub Copilot Chat interface in VS Code
    - Return `ChatResponse` with markdown formatting, tool calls, or quick-pick actions where applicable.
 
 ## Acceptance Criteria
-- [ ] `@openbase` participant is discoverable in Copilot Chat.
-- [ ] User can trigger at least one core OpenBase function via chat.
-- [ ] Response correctly utilizes markdown for readability.
-- [ ] Proper error handling for invalid/unsupported chat requests.
-- [ ] Documentation updated to reflect chat capabilities.
+- [x] `@openbase` participant is discoverable in Copilot Chat.
+- [x] User can trigger at least one core OpenBase function via chat.
+- [x] Response correctly utilizes markdown for readability.
+- [x] Proper error handling for invalid/unsupported chat requests.
+- [x] Documentation updated to reflect chat capabilities.

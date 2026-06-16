@@ -9,8 +9,8 @@ Este documento organiza o desenvolvimento da extensão, priorizando melhorias pa
 ### [v10.8] - Integração Nativa e UX
 *Foco: Melhorar a integração com os recursos nativos do VS Code.*
 
-- [ ] **#1** Suporte ao "Problems Panel"
-- [ ] **#2** Integração com Task Runner (`tasks.json`)
+- [x] **#1** Suporte ao "Problems Panel"
+- [x] **#2** Integração com Task Runner (GitHub Issues MVP)
 - [ ] **#3** Status Bar Indicator
 - [ ] **#4** Tematização Automática das Webviews
 - [ ] **#5** Quick Command Access
