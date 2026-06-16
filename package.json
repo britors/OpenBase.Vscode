@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.7.6",
+  "version": "10.7.7",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -24,7 +24,9 @@
             "id": "new-project",
             "title": "Criar Projeto",
             "description": "Aprenda a usar o comando 'OpenBase: New Project'.",
-            "media": { "markdown": "walkthroughs/welcome.md" }
+            "media": {
+              "markdown": "walkthroughs/welcome.md"
+            }
           }
         ]
       }
