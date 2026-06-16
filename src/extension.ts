@@ -2699,6 +2699,21 @@ async function httpRunner(): Promise<void> {
             return;
         }
 
+        if (msg.command === 'autoSaveHttp') {
+            const autoSaveEnabled = vscode.workspace.getConfiguration('openbase').get('editor.autoSave', true);
+            if (autoSaveEnabled) {
+                await extContext?.globalState.update(HTTP_AUTOSAVE_KEY, {
+                    method: msg.method,
+                    url: msg.url,
+                    headers: msg.headers,
+                    bodyType: msg.bodyType,
+                    body: msg.body,
+                    authToken: msg.authToken
+                });
+            }
+            return;
+        }
+
         if (msg.command === 'setEnv') {
             await extContext?.workspaceState.update(HTTP_ACTIVE_ENV_KEY, msg.filename ?? '');
             return;
