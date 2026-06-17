@@ -1368,17 +1368,23 @@ function parseConnectionString(cs: string): DbConnection | undefined {
     };
 
     const provider = get('Provider');
+    const ds = get('Data Source', 'DataSource');
+    const isOracleHint = /oracle/i.test(cs) || (provider && /oracle/i.test(provider));
 
     if (/(?:^|;)\s*Host\s*=/i.test(cs) || /(?:^|;)\s*Username\s*=/i.test(cs)) {
+        if (isOracleHint) {
+            const server   = get('Host', 'Server', 'Data Source', 'DataSource') ?? 'localhost';
+            const database = get('Database', 'Service Name', 'SID') ?? '';
+            return { type: 'oracle', label: `oracle · ${database || server}`, server, database,
+                user: get('Username', 'User Id', 'User', 'UID'), password: get('Password', 'PWD'), port: get('Port') };
+        }
         const server   = get('Host', 'Server') ?? 'localhost';
         const database = get('Database') ?? '';
         return { type: 'pgsql', label: `pgsql · ${database}`, server, database,
             user: get('Username', 'User Id'), password: get('Password'), port: get('Port') };
     }
 
-    const ds = get('Data Source', 'DataSource');
-    const isOracle = (provider && /oracle/i.test(provider)) || 
-                     (ds && (/[/@(]/.test(ds) || /oracle/i.test(cs)) && !/^\./.test(ds) && !/\\/.test(ds));
+    const isOracle = isOracleHint || (ds && (/[/@(]/.test(ds)) && !/^\./.test(ds) && !/\\/.test(ds));
 
     if (isOracle && ds) {
         return { type: 'oracle', label: `oracle · ${ds}`, server: ds, database: ds,
@@ -1387,6 +1393,13 @@ function parseConnectionString(cs: string): DbConnection | undefined {
 
     const server   = get('Server', 'Data Source', 'DataSource') ?? '.';
     const database = get('Database', 'Initial Catalog') ?? '';
+    
+    // Se não tem nada que indique SQL Server e temos dica de Oracle, assume Oracle
+    if (!get('Initial Catalog') && !get('Integrated Security') && isOracleHint) {
+         return { type: 'oracle', label: `oracle · ${database || server}`, server, database,
+            user: get('User Id', 'UID'), password: get('Password', 'PWD') };
+    }
+
     return { type: 'sqlserver', label: `sqlserver · ${database}`, server, database,
         user: get('User Id', 'UID'), password: get('Password', 'PWD') };
 }
