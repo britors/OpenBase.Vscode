@@ -3840,11 +3840,11 @@ async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise
                 break;
             }
             case 'oracle': {
-                const schema = targetSchema ? targetSchema.toUpperCase() : `UPPER('${conn.user}')`;
+                const schema = targetSchema ? targetSchema.toUpperCase() : (conn.user || '').toUpperCase();
                 const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\n
-                    SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER = ${schema}
+                    SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER = '${schema}'
                     UNION ALL
-                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER = ${schema} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER = '${schema}' AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
                     ORDER BY OWNER, OBJECT_TYPE, OBJECT_NAME;\n/\nEXIT\n`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
