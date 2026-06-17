@@ -3719,6 +3719,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     private errorMsg = '';
     private treeView?: vscode.TreeView<SqlTableItem>;
     filterText = '';
+    selectedSchema?: string;
 
     setTreeView(tv: vscode.TreeView<SqlTableItem>): void { this.treeView = tv; }
 
@@ -3735,7 +3736,8 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
         this._onDidChangeTreeData.fire();
     }
 
-    async refresh(): Promise<void> {
+    async refresh(schema?: string): Promise<void> {
+        this.selectedSchema = schema;
         this.schemas.clear();
         this.state = 'loading';
         if (this.treeView) this.treeView.message = 'Loading tables…';
@@ -3752,7 +3754,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
         }
 
         try {
-            const data = await loadSqlTables(conn);
+            const data = await loadSqlTables(conn, this.selectedSchema);
             this.schemas = data;
             this.state = 'idle';
             const total = Array.from(data.values()).reduce((s, v) => s + v.tables.length, 0);
@@ -3798,7 +3800,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     }
 }
 
-async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
+async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
     const extraPath = dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
@@ -3809,10 +3811,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
     try {
         switch (conn.type) {
             case 'sqlserver': {
+                const schemaFilter = targetSchema ? `WHERE TABLE_SCHEMA = '${targetSchema}'` : '';
                 const q = `
-                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'
+                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES ${schemaFilter} AND TABLE_TYPE='BASE TABLE'
                     UNION ALL
-                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES
+                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ${targetSchema ? `WHERE ROUTINE_SCHEMA = '${targetSchema}'` : ''}
                     ORDER BY TABLE_SCHEMA, TYPE, TABLE_NAME`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
@@ -3823,10 +3826,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 break;
             }
             case 'pgsql': {
+                const schemaFilter = targetSchema ? `AND table_schema = '${targetSchema}'` : `AND table_schema NOT IN ('pg_catalog','information_schema')`;
                 const q = `
-                    SELECT table_schema, table_name, 'TABLE' AS type FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema')
+                    SELECT table_schema, table_name, 'TABLE' AS type FROM information_schema.tables WHERE table_type='BASE TABLE' ${schemaFilter}
                     UNION ALL
-                    SELECT routine_schema, routine_name, routine_type FROM information_schema.routines WHERE routine_schema NOT IN ('pg_catalog','information_schema')
+                    SELECT routine_schema, routine_name, routine_type FROM information_schema.routines WHERE 1=1 ${schemaFilter.replace(/table_schema/g, 'routine_schema')}
                     ORDER BY table_schema, type, table_name`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const port = conn.port ?? '5432';
@@ -3836,11 +3840,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 break;
             }
             case 'oracle': {
-                const sysTables = `'SYS','SYSTEM','DBSNMP','APPQOSSYS','AUDSYS','CTXSYS','DVSYS','GSMADMIN_INTERNAL','LBACSYS','MDSYS','OLAPSYS','OUTLN','WMSYS','XDB'`;
+                const schema = targetSchema ? targetSchema.toUpperCase() : `UPPER('${conn.user}')`;
                 const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\n
-                    SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER NOT IN (${sysTables})
+                    SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER = ${schema}
                     UNION ALL
-                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER NOT IN (${sysTables}) AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER = ${schema} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
                     ORDER BY OWNER, OBJECT_TYPE, OBJECT_NAME;\n/\nEXIT\n`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
@@ -3889,7 +3893,7 @@ function buildSelectQuery(schema: string, table: string, dbType: DbTemplate): st
     switch (dbType) {
         case 'sqlserver': return `SELECT TOP 100 *\nFROM [${schema}].[${table}]`;
         case 'pgsql':     return `SELECT *\nFROM "${schema}"."${table}"\nLIMIT 100`;
-        case 'oracle':    return `SELECT *\nFROM ${schema}.${table}\nWHERE ROWNUM <= 100`;
+        case 'oracle':    return `SELECT *\nFROM "${schema}"."${table}"\nWHERE ROWNUM <= 100`;
     }
 }
 
@@ -3985,8 +3989,8 @@ async function loadTableDetails(
             break;
         }
         case 'oracle': {
-            const colQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT COLUMN_NAME, DATA_TYPE, CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END AS SZ, NULLABLE, NVL(TO_CHAR(SUBSTR(DATA_DEFAULT,1,50)),' ') FROM ALL_TAB_COLUMNS WHERE OWNER='${s}' AND TABLE_NAME='${t}' ORDER BY COLUMN_ID;\n/\nEXIT\n`;
-            const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s}' AND uc.TABLE_NAME='${t}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
+            const colQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT COLUMN_NAME, DATA_TYPE, CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END AS SZ, NULLABLE, NVL(TO_CHAR(SUBSTR(DATA_DEFAULT,1,50)),' ') FROM ALL_TAB_COLUMNS WHERE OWNER='${s.toUpperCase()}' AND TABLE_NAME='${t.toUpperCase()}' ORDER BY COLUMN_ID;\n/\nEXIT\n`;
+            const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s.toUpperCase()}' AND uc.TABLE_NAME='${t.toUpperCase()}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
             colCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
@@ -5059,6 +5063,64 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeWorkspaceFolders(() => sqlTableProvider?.refresh()),
+
+        vscode.commands.registerCommand('openbase.sqlRunner.tables.changeSchema', async () => {
+            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const conn = cwd ? findConnection(cwd) : undefined;
+            if (!conn) {
+                vscode.window.showErrorMessage('No connection found.');
+                return;
+            }
+            
+            let schemas: string[] = [];
+            const tmpFile = path.join(os.tmpdir(), `ob_schemas_${Date.now()}.sql`);
+            const extraPath = dotnetToolsPath();
+            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+
+            try {
+                if (conn.type === 'oracle') {
+                    const q = `SET MARKUP CSV ON QUOTE OFF\nSET PAGESIZE 50000\nSELECT username FROM all_users ORDER BY username;\n/\nEXIT\n`;
+                    fs.writeFileSync(tmpFile, q, 'utf-8');
+                    const cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                    const stdout = await new Promise<string>((resolve, reject) => {
+                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
+                    });
+                    schemas = stdout.trim().split('\n').filter(s => s.trim() && !s.includes('USERNAME')).map(s => s.trim());
+                } else if (conn.type === 'pgsql') {
+                    const q = `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name`;
+                    fs.writeFileSync(tmpFile, q, 'utf-8');
+                    const port = conn.port ?? '5432';
+                    const u = encodeURIComponent(conn.user ?? 'postgres');
+                    const p = encodeURIComponent(conn.password ?? '');
+                    const cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" -t -A -f "${tmpFile}"`;
+                    const stdout = await new Promise<string>((resolve, reject) => {
+                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
+                    });
+                    schemas = stdout.trim().split('\n').filter(s => s.trim()).map(s => s.trim());
+                } else if (conn.type === 'sqlserver') {
+                    const q = `SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name`;
+                    fs.writeFileSync(tmpFile, q, 'utf-8');
+                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                    if (conn.user)     parts.push(`-U "${conn.user}"`);
+                    if (conn.password) parts.push(`-P "${conn.password}"`);
+                    parts.push(`-i "${tmpFile}" -W -h -1`);
+                    const cmd = parts.join(' ');
+                    const stdout = await new Promise<string>((resolve, reject) => {
+                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
+                    });
+                    schemas = stdout.trim().split('\n').filter(s => s.trim()).map(s => s.trim());
+                }
+                
+                const selected = await vscode.window.showQuickPick(schemas, { placeHolder: 'Select a schema' });
+                if (selected) {
+                    await sqlTableProvider?.refresh(selected);
+                }
+            } catch (e) {
+                vscode.window.showErrorMessage('Failed to fetch schemas: ' + (e instanceof Error ? e.message : String(e)));
+            } finally {
+                try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            }
+        }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.tables.refresh',
             () => sqlTableProvider?.refresh()),

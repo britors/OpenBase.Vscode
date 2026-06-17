@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.12.2",
+  "version": "10.12.3",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -284,6 +284,12 @@
         "title": "ER Diagram",
         "category": "OpenBase",
         "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "openbase.sqlRunner.tables.changeSchema",
+        "title": "Change Schema",
+        "category": "OpenBase",
+        "icon": "$(organization)"
       },
       {
         "command": "openbase.sqlRunner.tables.filter",
@@ -601,6 +607,11 @@
         {
           "command": "openbase.sqlRunner.erDiagram",
           "when": "view == openbase.erdiagram.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "openbase.sqlRunner.tables.changeSchema",
+          "when": "view == openbase.sqlrunner.tables",
           "group": "navigation"
         },
         {
