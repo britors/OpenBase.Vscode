@@ -1362,10 +1362,12 @@ interface DbConnection {
 function parseConnectionString(cs: string): DbConnection | undefined {
     const get = (...keys: string[]): string | undefined => {
         for (const k of keys) {
-            const m = cs.match(new RegExp(`(?:^|;)\\s*${k.replace(/\s/g, '\\s*')}\\s*=\\s*([^;]+)`, 'i'));
+            const m = cs.match(new RegExp(`(?:^|;)\\s*${k.replace(/\\s/g, '\\s*')}\\s*=\\s*([^;]+)`, 'i'));
             if (m) return m[1].trim();
         }
     };
+
+    const provider = get('Provider');
 
     if (/(?:^|;)\s*Host\s*=/i.test(cs) || /(?:^|;)\s*Username\s*=/i.test(cs)) {
         const server   = get('Host', 'Server') ?? 'localhost';
@@ -1375,7 +1377,10 @@ function parseConnectionString(cs: string): DbConnection | undefined {
     }
 
     const ds = get('Data Source', 'DataSource');
-    if (ds && /[/@]/.test(ds) && !/^\./.test(ds) && !/\\/.test(ds)) {
+    const isOracle = (provider && /oracle/i.test(provider)) || 
+                     (ds && (/[/@(]/.test(ds) || /oracle/i.test(cs)) && !/^\./.test(ds) && !/\\/.test(ds));
+
+    if (isOracle && ds) {
         return { type: 'oracle', label: `oracle · ${ds}`, server: ds, database: ds,
             user: get('User Id', 'User', 'UID'), password: get('Password', 'PWD') };
     }
@@ -6248,6 +6253,11 @@ async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
                 cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
                 break;
             }
+            case 'oracle': {
+                fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT \"MigrationId\" FROM \"__EFMigrationsHistory\";\n/\nEXIT\n", 'utf-8');
+                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                break;
+            }
             default:
                 return new Set();
         }
@@ -6363,6 +6373,11 @@ async function getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> 
                 const u = encodeURIComponent(conn.user ?? 'postgres');
                 const p = encodeURIComponent(conn.password ?? '');
                 cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                break;
+            }
+            case 'oracle': {
+                fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT CAST(\"Version\" AS VARCHAR(50)) FROM \"VersionInfo\";\n/\nEXIT\n", 'utf-8');
+                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
             }
             default:
