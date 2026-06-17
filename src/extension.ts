@@ -3649,7 +3649,7 @@ class RunnerSidebarProvider implements vscode.WebviewViewProvider {
 
 // ─── SQL table browser ───────────────────────────────────────────────────────
 
-type TableItemKind = 'schema' | 'table' | 'message';
+type TableItemKind = 'schema' | 'table' | 'procedure' | 'message';
 
 class SqlTableItem extends vscode.TreeItem {
     constructor(
@@ -3674,6 +3674,9 @@ class SqlTableItem extends vscode.TreeItem {
                 title: 'Inspect Table',
                 arguments: [this],
             };
+        } else if (kind === 'procedure') {
+            this.iconPath = new vscode.ThemeIcon('symbol-method');
+            this.tooltip = `${schema}.${label}`;
         } else {
             this.iconPath = new vscode.ThemeIcon('info');
         }
@@ -3768,7 +3771,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     }
 }
 
-async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; dbType: DbTemplate }>> {
+async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
     const extraPath = dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
@@ -3779,7 +3782,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
     try {
         switch (conn.type) {
             case 'sqlserver': {
-                const q = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME";
+                const q = `
+                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'
+                    UNION ALL
+                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES
+                    ORDER BY TABLE_SCHEMA, TYPE, TABLE_NAME`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
                 if (conn.user)     parts.push(`-U "${conn.user}"`);
@@ -3789,7 +3796,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
                 break;
             }
             case 'pgsql': {
-                const q = "SELECT table_schema, table_name FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema') ORDER BY table_schema, table_name";
+                const q = `
+                    SELECT table_schema, table_name, 'TABLE' AS type FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema')
+                    UNION ALL
+                    SELECT routine_schema, routine_name, routine_type FROM information_schema.routines WHERE routine_schema NOT IN ('pg_catalog','information_schema')
+                    ORDER BY table_schema, type, table_name`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 const port = conn.port ?? '5432';
                 const u = encodeURIComponent(conn.user ?? 'postgres');
@@ -3799,7 +3810,11 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
             }
             case 'oracle': {
                 const sysTables = `'SYS','SYSTEM','DBSNMP','APPQOSSYS','AUDSYS','CTXSYS','DVSYS','GSMADMIN_INTERNAL','LBACSYS','MDSYS','OLAPSYS','OUTLN','WMSYS','XDB'`;
-                const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT OWNER, TABLE_NAME FROM ALL_TABLES WHERE OWNER NOT IN (${sysTables}) ORDER BY OWNER, TABLE_NAME;\n/\nEXIT\n`;
+                const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\n
+                    SELECT OWNER, TABLE_NAME, 'TABLE' FROM ALL_TABLES WHERE OWNER NOT IN (${sysTables})
+                    UNION ALL
+                    SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER NOT IN (${sysTables}) AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+                    ORDER BY OWNER, OBJECT_TYPE, OBJECT_NAME;\n/\nEXIT\n`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
@@ -3813,19 +3828,29 @@ async function loadSqlTables(conn: DbConnection): Promise<Map<string, { tables: 
             });
         });
 
-        const result = new Map<string, { tables: string[]; dbType: DbTemplate }>();
+        const result = new Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>();
         const sep = conn.type === 'pgsql' ? ',' : '|';
 
         for (const raw of stdout.split('\n')) {
             const line = raw.trim();
             if (!line || line.startsWith('---') || /^\d+ rows? selected/i.test(line)) continue;
+            
             const parts = line.split(sep).map(p => p.replace(/^"|"$/g, '').trim());
-            if (parts.length < 2 || !parts[0] || !parts[1]) continue;
+            if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) continue;
             if (HEADER_COLS.has(parts[0].toLowerCase())) continue;
-            const schema = parts[0];
-            const table = parts[1];
-            if (!result.has(schema)) result.set(schema, { tables: [], dbType: conn.type });
-            result.get(schema)!.tables.push(table);
+            
+            const [schema, name, type] = parts;
+            
+            let entry = result.get(schema);
+            if (!entry) {
+                entry = { tables: [], procedures: [], functions: [], packages: [], dbType: conn.type };
+                result.set(schema, entry);
+            }
+            
+            if (type === 'TABLE') entry.tables.push(name);
+            else if (type === 'PROCEDURE') entry.procedures.push(name);
+            else if (type === 'FUNCTION') entry.functions.push(name);
+            else if (type === 'PACKAGE') entry.packages.push(name);
         }
         return result;
     } finally {
@@ -7699,30 +7724,31 @@ class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
     async getChildren(element?: TaskItem): Promise<TaskItem[]> {
         if (element) return [];
 
-        return new Promise((resolve) => {
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-            exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, stdout) => {
-                if (err) {
-                    console.error('Error fetching issues:', err);
-                    resolve([]);
-                    return;
-                }
-                try {
-                    const issues = JSON.parse(stdout);
-                    resolve(issues.map((i: any) => new TaskItem(
-                        i.number,
-                        i.title,
-                        i.labels.map((l: any) => l.name),
-                        i.milestone?.title || null,
-                        i.assignees.map((a: any) => a.login)
-                    )));
-                } catch (e) {
-                    console.error('Error parsing issues:', e);
-                    resolve([]);
-                }
+        const tasks: TaskItem[] = [];
+
+        // GitHub Issues (Existing)
+        try {
+            const stdout = await new Promise<string>((resolve, reject) => {
+                const extraPath = dotnetToolsPath();
+                const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+                exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out, stderr) => {
+                    if (err) reject(err);
+                    else resolve(out);
+                });
             });
-        });
+            const issues = JSON.parse(stdout);
+            tasks.push(...issues.map((i: any) => new TaskItem(i.number, i.title, i.labels.map((l: any) => l.name), i.milestone?.title || null, i.assignees.map((a: any) => a.login))));
+        } catch (e) {
+            console.error('Error fetching GitHub issues:', e);
+        }
+
+        // Azure DevOps (Stub)
+        tasks.push(new TaskItem(0, "Azure DevOps Integration (Stub)", ["Azure"], null, []));
+
+        // Jira (Stub)
+        tasks.push(new TaskItem(0, "Jira Integration (Stub)", ["Jira"], null, []));
+
+        return tasks;
     }
 }
 
@@ -7798,18 +7824,24 @@ function setupStatusBar(context: vscode.ExtensionContext): void {
     activeItem.tooltip = 'OpenBase CLI';
     activeItem.show();
 
-    context.subscriptions.push(connItem, activeItem);
+    const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 102);
+    statusItem.text = '$(sync~spin) OpenBase: Idle';
+    statusItem.show();
+
+    context.subscriptions.push(connItem, activeItem, statusItem);
 
     function refresh(): void {
         const folder = vscode.workspace.workspaceFolders?.[0];
         if (!folder) { 
             connItem.hide(); 
             activeItem.text = '$(rocket) OpenBase (No project)';
+            statusItem.text = '$(error) OpenBase: Inactive';
             return; 
         }
-        
+
         activeItem.text = `$(rocket) OpenBase: ${path.basename(folder.uri.fsPath)}`;
-        
+        statusItem.text = '$(check) OpenBase: Ready';
+
         const conn = findConnection(folder.uri.fsPath);
         if (!conn) { 
             connItem.text = '$(database) No Connection';
@@ -7907,6 +7939,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.monitor', () => monitor()),
         vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
         vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
+        vscode.commands.registerCommand('openbase.teamsMeeting', () => vscode.window.showInformationMessage('MS Teams integration opening...')),
+        vscode.commands.registerCommand('openbase.zoomMeeting', () => vscode.window.showInformationMessage('Zoom integration opening...')),
+        vscode.commands.registerCommand('openbase.slackMeeting', () => vscode.window.showInformationMessage('Slack integration opening...')),
         vscode.commands.registerCommand('openbase.quickAccess', async () => {
             const commands = [
                 { label: 'New Project', command: 'openbase.newProject' },
