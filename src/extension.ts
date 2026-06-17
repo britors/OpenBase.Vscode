@@ -1432,6 +1432,15 @@ function findConnection(cwd: string): DbConnection | undefined {
     } catch { /* ignore */ }
 }
 
+function buildOracleConnString(conn: DbConnection): string {
+    const user = conn.user ?? '';
+    const pass = conn.password ?? '';
+    const isSys = user.toLowerCase() === 'sys';
+    const role = isSys ? ' AS SYSDBA' : '';
+    // Quote password to support special characters like '@'
+    return `"${user}/\\"${pass}\\"@${conn.server}${role}"`;
+}
+
 function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: string[]; rows: string[][]; message?: string } {
     const lines = raw.split('\n').map(l => l.trimEnd()).filter(Boolean);
 
