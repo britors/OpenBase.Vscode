@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
 import { execSync, exec, spawn } from 'child_process';
+import { Utils } from './utils';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
@@ -14,15 +15,15 @@ const SPECIALIST_TYPES = ['query', 'command', 'httpcall'] as const;
 const PARAM_TYPES = ['string', 'int', 'bool', 'decimal', 'Guid', 'DateTime', 'long', 'double', 'float', 'short'] as const;
 const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {};
 
+const utils = Utils.getInstance();
+
+
 type DbTemplate = typeof DB_TEMPLATES[number];
 type BuildConfig = typeof BUILD_CONFIGS[number];
 
-function dotnetToolsPath(): string {
-    return path.join(os.homedir(), '.dotnet', 'tools');
-}
 
 function isOpenBaseInstalled(): boolean {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     try {
         execSync('openbase --help', { stdio: 'ignore', env });
@@ -32,17 +33,6 @@ function isOpenBaseInstalled(): boolean {
     }
 }
 
-function openTerminal(name: string, cwd: string, command: string): void {
-    const extraPath = dotnetToolsPath();
-    const currentPath = process.env.PATH ?? '';
-    const terminal = vscode.window.createTerminal({
-        name: `OpenBase: ${name}`,
-        cwd,
-        env: { PATH: `${extraPath}${path.delimiter}${currentPath}` },
-    });
-    terminal.show();
-    terminal.sendText(command);
-}
 
 async function resolveWorkingDir(uri?: vscode.Uri): Promise<string | undefined> {
     if (uri) return uri.fsPath;
@@ -84,134 +74,8 @@ let diagnosticCollection: vscode.DiagnosticCollection;
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
-async function newProject(uri?: vscode.Uri): Promise<void> {
-    if (!await guardInstalled()) return;
+// Registration centralized in setup functions below
 
-    const prefs = extContext?.globalState.get<Record<string, string>>(NEW_PROJECT_PREFS_KEY) ?? {};
-
-    const projectName = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (1/8) — Project name',
-        prompt: 'Project name (PascalCase, no spaces)',
-        placeHolder: 'MyProject',
-        validateInput: (v) => {
-            if (!v.trim()) return 'Project name is required';
-            if (!/^[a-zA-Z0-9._-]+$/.test(v)) return 'Invalid project name';
-        },
-    });
-    if (!projectName) return;
-
-    const template = await vscode.window.showQuickPick(
-        DB_TEMPLATES.map((t): vscode.QuickPickItem => ({
-            label: t,
-            description: dbTemplateLabel(t),
-        })),
-        { title: 'OpenBase: New Project (2/8) — Database template', placeHolder: 'Choose a database' }
-    );
-    if (!template) return;
-
-    const dbServerDefault = prefs.dbServer ?? (template.label === 'sqlserver' ? '.' : 'localhost');
-    const dbServer = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (3/8) — Database server',
-        prompt: 'Database server address (leave empty for default)',
-        placeHolder: template.label === 'sqlserver' ? '.' : 'localhost',
-        value: dbServerDefault,
-    });
-    if (dbServer === undefined) return;
-
-    const dbName = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (4/8) — Database name',
-        prompt: 'Database name (leave empty to use project name)',
-        placeHolder: projectName,
-        value: projectName,
-    });
-    if (dbName === undefined) return;
-
-    const dbUser = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (5/8) — Database user',
-        prompt: template.label === 'sqlserver'
-            ? 'Database user (leave empty for Windows Authentication)'
-            : 'Database user',
-        placeHolder: template.label === 'sqlserver' ? 'Windows Auth' : 'postgres',
-        value: prefs.dbUser ?? '',
-    });
-    if (dbUser === undefined) return;
-
-    const dbPassword = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (6/8) — Database password',
-        prompt: template.label === 'sqlserver'
-            ? 'Database password (leave empty for Windows Authentication)'
-            : 'Database password',
-        password: true,
-    });
-    if (dbPassword === undefined) return;
-
-    const mediatrLicense = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (7/8) — MediatR license',
-        prompt: 'MediatR commercial license key (leave empty if none)',
-        placeHolder: 'Leave empty if not applicable',
-        value: prefs.mediatrLicense ?? '',
-    });
-    if (mediatrLicense === undefined) return;
-
-    const automapperLicense = await vscode.window.showInputBox({
-        title: 'OpenBase: New Project (8/8) — AutoMapper license',
-        prompt: 'AutoMapper commercial license key (leave empty if none)',
-        placeHolder: 'Leave empty if not applicable',
-        value: prefs.automapperLicense ?? '',
-    });
-    if (automapperLicense === undefined) return;
-
-    const cwd = await resolveWorkingDir(uri);
-    if (!cwd) return;
-
-    const args: string[] = [`-n ${projectName}`, `-s ${template.label}`];
-    if (dbServer.trim())           args.push(`--db-server "${dbServer.trim()}"`);
-    if (dbName.trim())             args.push(`--db-name "${dbName.trim()}"`);
-    if (dbUser.trim())             args.push(`--db-user "${dbUser.trim()}"`);
-    if (dbPassword.trim())         args.push(`--db-password "${dbPassword.trim()}"`);
-    args.push(`--mediatr-license "${mediatrLicense.trim()}"`);
-    args.push(`--automapper-license "${automapperLicense.trim()}"`);
-
-    const channel = vscode.window.createOutputChannel('OpenBase: New Project');
-    channel.show(true);
-
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
-    const success = await new Promise<boolean>((resolve) => {
-        const child = exec(`openbase new ${args.join(' ')}`, { cwd, env });
-        child.stdout?.on('data', (d: string) => channel.append(d));
-        child.stderr?.on('data', (d: string) => channel.append(d));
-        child.on('close', (code) => resolve(code === 0));
-        child.on('error', (err) => { channel.appendLine(err.message); resolve(false); });
-    });
-
-    if (!success) {
-        vscode.window.showErrorMessage(`Failed to create project "${projectName}". Check the output for details.`);
-        return;
-    }
-
-    await extContext?.globalState.update(NEW_PROJECT_PREFS_KEY, {
-        template: template.label,
-        dbServer: dbServer.trim(),
-        dbUser: dbUser.trim(),
-        mediatrLicense: mediatrLicense.trim(),
-        automapperLicense: automapperLicense.trim(),
-    });
-
-    const projectUri = vscode.Uri.file(path.join(cwd, projectName));
-    const action = await vscode.window.showInformationMessage(
-        `Project "${projectName}" created successfully!`,
-        'Open Folder',
-        'Open in New Window'
-    );
-
-    if (action === 'Open Folder') {
-        vscode.commands.executeCommand('vscode.openFolder', projectUri, false);
-    } else if (action === 'Open in New Window') {
-        vscode.commands.executeCommand('vscode.openFolder', projectUri, true);
-    }
-}
 
 // ─── scaffold ───────────────────────────────────────────────────────────────
 
@@ -232,7 +96,7 @@ async function scaffold(uri?: vscode.Uri): Promise<void> {
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
 
-    openTerminal('Scaffold', cwd, `openbase scaffold -e ${entity}`);
+    Utils.getInstance().openTerminal('Scaffold', cwd, `openbase scaffold -e ${entity}`);
 }
 
 async function scaffoldUpdate(uri?: vscode.Uri): Promise<void> {
@@ -252,7 +116,7 @@ async function scaffoldUpdate(uri?: vscode.Uri): Promise<void> {
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
 
-    openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${entity} --update`);
+    Utils.getInstance().openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${entity} --update`);
 }
 
 // ─── specialist ─────────────────────────────────────────────────────────────
@@ -363,7 +227,7 @@ async function specialist(uri?: vscode.Uri): Promise<void> {
     for (const p of params)  args.push(`--param ${p}`);
     for (const c of columns) args.push(`--column ${c}`);
 
-    openTerminal('Specialist', cwd, `openbase specialist ${args.join(' ')}`);
+    Utils.getInstance().openTerminal('Specialist', cwd, `openbase specialist ${args.join(' ')}`);
 }
 
 // ─── procedure ──────────────────────────────────────────────────────────────
@@ -393,7 +257,7 @@ async function procedure(uri?: vscode.Uri): Promise<void> {
     if (!cwd) return;
 
     const args = schema?.trim() ? `-n ${name} -s ${schema.trim()}` : `-n ${name}`;
-    openTerminal('Procedure', cwd, `openbase procedure ${args}`);
+    Utils.getInstance().openTerminal('Procedure', cwd, `openbase procedure ${args}`);
 }
 
 // ─── extension ──────────────────────────────────────────────────────────────
@@ -426,7 +290,7 @@ async function extensionAdd(uri?: vscode.Uri): Promise<void> {
     if (!cwd) return;
 
     const args = provider ? `${ext.label} -p ${provider}` : ext.label;
-    openTerminal('Extension Add', cwd, `openbase extension add ${args}`);
+    Utils.getInstance().openTerminal('Extension Add', cwd, `openbase extension add ${args}`);
 }
 
 async function extensionList(uri?: vscode.Uri): Promise<void> {
@@ -435,7 +299,7 @@ async function extensionList(uri?: vscode.Uri): Promise<void> {
     const cwd = await resolveWorkingDir(uri);
     if (!cwd) return;
 
-    openTerminal('Extension List', cwd, 'openbase extension list');
+    Utils.getInstance().openTerminal('Extension List', cwd, 'openbase extension list');
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -489,7 +353,7 @@ async function build(uri?: vscode.Uri): Promise<void> {
     if (!cwd) return;
 
     const flags = noRestore.label === 'Yes' ? ' --no-restore' : '';
-    openTerminal('Build', cwd, `openbase build -c ${config.label}${flags}`);
+    Utils.getInstance().openTerminal('Build', cwd, `openbase build -c ${config.label}${flags}`);
 }
 
 // ─── run ────────────────────────────────────────────────────────────────────
@@ -514,26 +378,26 @@ async function run(uri?: vscode.Uri): Promise<void> {
     if (!cwd) return;
 
     const flags = noBuild.label === 'Yes' ? ' --no-build' : '';
-    openTerminal('Run', cwd, `openbase run -c ${config.label}${flags}`);
+    Utils.getInstance().openTerminal('Run', cwd, `openbase run -c ${config.label}${flags}`);
 }
 
-// ─── misc ────────────────────────────────────────────────────────────────────
+// ─── misc ──────────────────────────────────────────────────────────────3──────
 
 async function update(): Promise<void> {
     if (!await guardInstalled()) return;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    openTerminal('Update', cwd, 'openbase update');
+    Utils.getInstance().openTerminal('Update', cwd, 'openbase update');
 }
 
 async function history(): Promise<void> {
     if (!await guardInstalled()) return;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    openTerminal('History', cwd, 'openbase history');
+    Utils.getInstance().openTerminal('History', cwd, 'openbase history');
 }
 
 async function version(): Promise<void> {
     if (!await guardInstalled()) return;
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     try {
         const output = execSync('openbase version show', { encoding: 'utf-8', env }).trim();
@@ -674,14 +538,14 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     private async _scaffoldUpdate(d: { entity: string }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'scu' }); return; }
-        openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${d.entity} --update`);
+        Utils.getInstance().openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${d.entity} --update`);
         view.webview.postMessage({ command: 'done', ctx: 'scu' });
     }
 
     private async _scaffold(d: { entity: string }, view: vscode.WebviewView): Promise<void> {
         const cwd = await this._cwd();
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'sc' }); return; }
-        openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
+        Utils.getInstance().openTerminal('Scaffold', cwd, `openbase scaffold -e ${d.entity}`);
         view.webview.postMessage({ command: 'done', ctx: 'sc' });
     }
 
@@ -706,7 +570,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         if (!cwd) { view.webview.postMessage({ command: 'done', ctx: 'pr' }); return; }
 
         if (!d.name) {
-            openTerminal('Procedure', cwd, 'openbase procedure');
+            Utils.getInstance().openTerminal('Procedure', cwd, 'openbase procedure');
             view.webview.postMessage({ command: 'done', ctx: 'pr', text: 'Terminal aberto — selecione a procedure no terminal.' });
             return;
         }
@@ -739,7 +603,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         const channel = vscode.window.createOutputChannel('OpenBase: Run');
         channel.show(true);
 
-        const extraPath = dotnetToolsPath();
+        const extraPath = utils.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
         this._runProcess = spawn('openbase', args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -806,7 +670,7 @@ class OpenBasePanelProvider implements vscode.WebviewViewProvider {
         diagnosticCollection.clear();
 
         let fullOutput = '';
-        const extraPath = dotnetToolsPath();
+        const extraPath = utils.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         return new Promise<boolean>((resolve) => {
             const child = exec(cmd, { cwd, env, timeout: 60000 });
@@ -1479,12 +1343,8 @@ function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: str
     return { columns, rows };
 }
 
-function getNonce(): string {
-    let text = '';
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) text += chars.charAt(Math.floor(Math.random() * chars.length));
-    return text;
-}
+// getNonce moved to src/utils.ts
+
 
 const NEW_PROJECT_PREFS_KEY = 'newProjectPrefs';
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
@@ -1669,7 +1529,7 @@ async function sqlRunner(): Promise<void> {
         { enableScripts: true, retainContextWhenHidden: true }
     );
     sqlPanel.onDidDispose(() => { sqlPanel = undefined; sqlOut().appendLine('[SQL Runner] Panel disposed.'); });
-    const sqlNonce = getNonce();
+    const sqlNonce = utils.getNonce();
     sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
 
     const savedSql = extContext?.globalState.get<string>(SQL_AUTOSAVE_KEY);
@@ -1768,7 +1628,7 @@ async function sqlRunner(): Promise<void> {
             }
             sqlPanel?.webview.postMessage({ command: 'explainRunning' });
             const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
-            const extraPath = dotnetToolsPath();
+            const extraPath = utils.dotnetToolsPath();
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
             try {
                 let explainSql = '';
@@ -1840,7 +1700,7 @@ async function sqlRunner(): Promise<void> {
         sqlOut().appendLine('[SQL Runner] Sent "running" to webview.');
 
         const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
-        const extraPath = dotnetToolsPath();
+        const extraPath = utils.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         let cmd = '';
 
@@ -2694,7 +2554,7 @@ async function httpRunner(): Promise<void> {
         { enableScripts: true, retainContextWhenHidden: true }
     );
     httpPanel.onDidDispose(() => { httpPanel = undefined; });
-    const httpNonce = getNonce();
+    const httpNonce = utils.getNonce();
     httpPanel.webview.html = buildHttpRunnerHtml(baseUrl, httpNonce, httpPanel.webview.cspSource);
 
     if (cwd) {
@@ -3801,7 +3661,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
 }
 
 async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
     let cmd = '';
@@ -3969,7 +3829,7 @@ async function loadTableDetails(
     schema: string,
     table: string,
 ): Promise<{ columns: TableColumn[]; constraints: TableConstraint[] }> {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const ts = Date.now();
     const colFile = path.join(os.tmpdir(), `ob_cols_${ts}.sql`);
@@ -4570,7 +4430,7 @@ async function openErDiagram(): Promise<void> {
         return;
     }
 
-    const nonce = getNonce();
+    const nonce = utils.getNonce();
     erDiagramPanel = vscode.window.createWebviewPanel(
         'openbase.erDiagram', 'ER Diagram',
         vscode.ViewColumn.One,
@@ -4649,7 +4509,7 @@ async function logViewer(): Promise<void> {
         return;
     }
 
-    const nonce = getNonce();
+    const nonce = utils.getNonce();
     logPanel = vscode.window.createWebviewPanel(
         'openbase.logViewer', 'OpenBase Logs',
         vscode.ViewColumn.One,
@@ -4668,7 +4528,7 @@ async function logViewer(): Promise<void> {
             const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (!cwd) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
             const config = msg.config ?? 'Debug';
-            const extraPath = dotnetToolsPath();
+            const extraPath = utils.dotnetToolsPath();
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
             logProcess = spawn('openbase', ['run', '-c', config], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
             logPanel?.webview.postMessage({ command: 'processStarted' });
@@ -4981,7 +4841,7 @@ async function openTableInspector(
         return;
     }
 
-    const nonce = getNonce();
+    const nonce = utils.getNonce();
     const panel = vscode.window.createWebviewPanel(
         'openbase.tableInspector',
         `${schema}.${table}`,
@@ -5020,7 +4880,7 @@ async function openTableInspector(
             const args = [`-e ${inputEntity}`, `--schema "${schema}"`, `--table "${table}"`];
             if (isUpdate) args.push('--update');
             else args.push('--mode modelfirst');
-            openTerminal(isUpdate ? 'Scaffold Update' : 'Scaffold', cwd, `openbase scaffold ${args.join(' ')}`);
+            Utils.getInstance().openTerminal(isUpdate ? 'Scaffold Update' : 'Scaffold', cwd, `openbase scaffold ${args.join(' ')}`);
         }
     });
 
@@ -5100,7 +4960,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
             
             let schemas: string[] = [];
             const tmpFile = path.join(os.tmpdir(), `ob_schemas_${Date.now()}.sql`);
-            const extraPath = dotnetToolsPath();
+            const extraPath = utils.dotnetToolsPath();
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
             try {
@@ -5748,7 +5608,7 @@ function stopMonCounters(): void {
 
 function startMonCounters(pid: number): void {
     stopMonCounters();
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
     // Check availability first
@@ -5911,7 +5771,7 @@ function monStartPolling(intervalMs: number): void {
 async function monitor(): Promise<void> {
     if (monitorPanel) { monitorPanel.reveal(vscode.ViewColumn.One); return; }
 
-    const nonce = getNonce();
+    const nonce = utils.getNonce();
     monitorPanel = vscode.window.createWebviewPanel(
         'openbase.monitor', 'Monitor',
         vscode.ViewColumn.One,
@@ -6340,7 +6200,7 @@ function listMigrationsFromFs(migrationsDir: string): string[] {
 }
 
 async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
     let cmd = '';
@@ -6462,7 +6322,7 @@ function listFmMigrationsFromFs(dir: string): Array<{ version: string; label: st
 }
 
 async function getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const tmpFile = path.join(os.tmpdir(), `ob_fmmig_${Date.now()}.sql`);
     try {
@@ -6566,7 +6426,7 @@ function runFmMigrationCommand(cwd: string, targetVersion?: string, isDown = fal
     }
     const connStr = buildFmConnString(conn);
     const processor = fmProcessorName(conn);
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const title = isDown ? `FM Rollback to ${targetVersion ?? '0'}` : `FM Migrate Up${targetVersion ? ` to ${targetVersion}` : ''}`;
     const channel = vscode.window.createOutputChannel(`OpenBase: ${title}`);
@@ -6716,10 +6576,10 @@ function buildMigrationScriptHtml(nonce: string, cspSource: string): string {
 async function showMigrationScript(cwd: string, fromId?: string, toId?: string): Promise<void> {
     const migrationsDir = findMigrationsDir(cwd);
     const project = migrationsDir ? findMigrationProject(migrationsDir) : undefined;
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
-    const nonce = getNonce();
+    const nonce = utils.getNonce();
 
     if (migrationScriptPanel) {
         migrationScriptPanel.reveal(vscode.ViewColumn.Beside);
@@ -6778,7 +6638,7 @@ async function showMigrationScript(cwd: string, fromId?: string, toId?: string):
 function runMigrationCommand(cwd: string, efArgs: string[], title: string): void {
     const channel = vscode.window.createOutputChannel(`OpenBase: ${title}`);
     channel.show(true);
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const migrationsDir = findMigrationsDir(cwd);
     const project = migrationsDir ? findMigrationProject(migrationsDir) : undefined;
@@ -6957,7 +6817,7 @@ let depShowOnlyOutdated = false;
 let depProvider: DepInspectorProvider | undefined;
 
 async function loadDependencies(cwd: string): Promise<ProjectPackages[]> {
-    const extraPath = dotnetToolsPath();
+    const extraPath = utils.dotnetToolsPath();
     const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
     const run = (args: string) => new Promise<string>(resolve => {
         exec(`dotnet list package ${args} --format json`, { cwd, env, timeout: 60000 }, (err, stdout) => {
@@ -7084,7 +6944,7 @@ function setupDepInspector(context: vscode.ExtensionContext): void {
             const projDir = path.isAbsolute(item.projectPath)
                 ? path.dirname(item.projectPath)
                 : path.dirname(path.join(cwd, item.projectPath));
-            const extraPath = dotnetToolsPath();
+            const extraPath = utils.dotnetToolsPath();
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
             const out = vscode.window.createOutputChannel('OpenBase Dependencies');
             out.show(true);
@@ -7111,7 +6971,7 @@ function setupDepInspector(context: vscode.ExtensionContext): void {
                 { modal: true }, 'Update All',
             );
             if (confirm !== 'Update All') return;
-            const extraPath = dotnetToolsPath();
+            const extraPath = utils.dotnetToolsPath();
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
             const out = vscode.window.createOutputChannel('OpenBase Dependencies');
             out.show(true);
@@ -7589,7 +7449,7 @@ async function sePublishProject(cwd: string): Promise<void> {
     if (!picked || picked.kind === vscode.QuickPickItemKind.Separator) return;
 
     if (existing.includes(picked.label)) {
-        openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${picked.label}"`);
+        Utils.getInstance().openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${picked.label}"`);
         return;
     }
 
@@ -7626,7 +7486,7 @@ async function sePublishLocal(
   </PropertyGroup>
 </Project>`);
 
-    openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}"`);
+    Utils.getInstance().openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}"`);
 }
 
 async function sePublishFtp(
@@ -7659,7 +7519,7 @@ async function sePublishFtp(
   </PropertyGroup>
 </Project>`);
 
-    openTerminal('Publish FTP', projDir,
+    Utils.getInstance().openTerminal('Publish FTP', projDir,
         `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
 }
 
@@ -7696,7 +7556,7 @@ async function sePublishWebDeploy(
   </PropertyGroup>
 </Project>`);
 
-    openTerminal('Publish Web Deploy', projDir,
+    Utils.getInstance().openTerminal('Publish Web Deploy', projDir,
         `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
 }
 
@@ -7732,13 +7592,13 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.solutionExplorer.buildAll', () => {
             const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
             const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
-            openTerminal('Build Solution', cwd, `dotnet build ${target}`);
+            Utils.getInstance().openTerminal('Build Solution', cwd, `dotnet build ${target}`);
         }),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.runAll', () => {
             const proj = findEntryProject(cwd);
             const target = proj ? `"${proj.csprojPath}"` : '.';
-            openTerminal('Run Solution', cwd, `dotnet run --project ${target}`);
+            Utils.getInstance().openTerminal('Run Solution', cwd, `dotnet run --project ${target}`);
         }),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.debug', async () => {
@@ -7782,7 +7642,7 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.solutionExplorer.test', () => {
             const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
             const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
-            openTerminal('Run Tests', cwd, `dotnet test ${target}`);
+            Utils.getInstance().openTerminal('Run Tests', cwd, `dotnet test ${target}`);
         }),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.publish',
@@ -7791,13 +7651,13 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.solutionExplorer.build',
             (item: SolutionNode) => {
                 if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
-                openTerminal('Build', path.dirname(item.fsPath), `dotnet build "${item.fsPath}"`);
+                Utils.getInstance().openTerminal('Build', path.dirname(item.fsPath), `dotnet build "${item.fsPath}"`);
             }),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.run',
             (item: SolutionNode) => {
                 if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
-                openTerminal('Run', path.dirname(item.fsPath), `dotnet run --project "${item.fsPath}"`);
+                Utils.getInstance().openTerminal('Run', path.dirname(item.fsPath), `dotnet run --project "${item.fsPath}"`);
             }),
 
         vscode.commands.registerCommand('openbase.solutionExplorer.openTerminal',
@@ -7808,7 +7668,7 @@ function setupSolutionExplorer(context: vscode.ExtensionContext): void {
                 const terminal = vscode.window.createTerminal({
                     name: `OpenBase: ${projName}`,
                     cwd: projDir,
-                    env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
+                    env: { PATH: `${utils.dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
                 });
                 terminal.show();
             }),
@@ -7854,7 +7714,7 @@ class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
         // GitHub Issues (Existing)
         try {
             const stdout = await new Promise<string>((resolve, reject) => {
-                const extraPath = dotnetToolsPath();
+                const extraPath = utils.dotnetToolsPath();
                 const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
                 exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out, stderr) => {
                     if (err) reject(err);
@@ -7892,7 +7752,7 @@ function setupTaskRunner(context: vscode.ExtensionContext): void {
 
     reg('openbase.taskRunner.openInBrowser', (item: TaskItem) => {
         if (!item) return;
-        const extraPath = dotnetToolsPath();
+        const extraPath = utils.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         exec(`gh issue view ${item.number} --web`, { cwd: rootPath, env });
     });
@@ -7902,7 +7762,7 @@ function setupTaskRunner(context: vscode.ExtensionContext): void {
         const terminal = vscode.window.createTerminal({
             name: `OpenBase: Issue #${item.number}`,
             cwd: rootPath,
-            env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
+            env: { PATH: `${utils.dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
         });
         terminal.show();
         terminal.sendText(`gh issue develop ${item.number}`);
@@ -8087,7 +7947,8 @@ export function activate(context: vscode.ExtensionContext): void {
                 }
             }
         }),
-        reg('openbase.newProject',     newProject),
+        // newProject handled by ProjectCommands class
+
         reg('openbase.scaffold',       scaffold),
         reg('openbase.scaffoldUpdate', scaffoldUpdate),
         reg('openbase.specialist',     specialist),
