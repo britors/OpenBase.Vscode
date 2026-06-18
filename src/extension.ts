@@ -4007,8 +4007,9 @@ async function loadTableDetails(
             break;
         }
         case 'oracle': {
-            const colQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT COLUMN_NAME, DATA_TYPE, CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END AS SZ, NULLABLE FROM ALL_TAB_COLUMNS WHERE OWNER='${s.toUpperCase()}' AND TABLE_NAME='${t.toUpperCase()}' ORDER BY COLUMN_ID;\n/\nEXIT\n`;
+            const colQ = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT COLUMN_NAME || '|' || DATA_TYPE || '|' || CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END || '|' || NULLABLE FROM ALL_TAB_COLUMNS WHERE OWNER='${s.toUpperCase()}' AND TABLE_NAME='${t.toUpperCase()}' ORDER BY COLUMN_ID;\nEXIT\n`;
             const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s.toUpperCase()}' AND uc.TABLE_NAME='${t.toUpperCase()}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
+            console.log(`Oracle Column Query Content: ${colQ}`);
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
             colCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
@@ -4017,15 +4018,22 @@ async function loadTableDetails(
         }
     }
 
-    const runQ = (cmd: string) => new Promise<string>((resolve, reject) => {
+    const runQ = (cmd: string, type: string) => new Promise<string>((resolve, reject) => {
+        console.log(`Executing ${type} command: ${cmd}`);
         exec(cmd, { env, timeout: 15000 }, (err, out, stderr) => {
-            if (err && !out) reject(new Error(stderr || err.message));
-            else resolve(out);
+            if (err) {
+                console.error(`Error executing ${type}:`, err);
+                console.error(`Stderr:`, stderr);
+                reject(new Error(stderr || err.message));
+            } else {
+                console.log(`${type} output:`, out);
+                resolve(out);
+            }
         });
     });
 
     try {
-        const [colOut, conOut] = await Promise.all([runQ(colCmd), runQ(conCmd)]);
+        const [colOut, conOut] = await Promise.all([runQ(colCmd, 'columns'), runQ(conCmd, 'constraints')]);
 
         const HEADER = new Set(['column_name', 'constraint_type', 'sz', 'owner']);
 
@@ -4033,7 +4041,7 @@ async function loadTableDetails(
             raw.split('\n')
                 .map(l => l.trim())
                 .filter(l => l && !l.startsWith('---') && !/^\d+ rows? selected/i.test(l))
-                .map(l => l.split(sep).map(p => p.replace(/^"|"$/g, '').trim()))
+                .map(l => l.split(conn.type === 'oracle' ? '|' : sep).map(p => p.replace(/^"|"$/g, '').trim()))
                 .filter(p => p.length >= minCols && !HEADER.has(p[0].toLowerCase()));
 
         const conRows = parseRows(conOut, 3);
@@ -4053,7 +4061,7 @@ async function loadTableDetails(
             };
         });
 
-        const columns: TableColumn[] = parseRows(colOut, 5).map(r => ({
+        const columns: TableColumn[] = parseRows(colOut, conn.type === 'oracle' ? 4 : 5).map(r => ({
             name: r[0] ?? '',
             type: r[1] ?? '',
             size: r[2] ?? '',
@@ -5097,7 +5105,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
 
             try {
                 if (conn.type === 'oracle') {
-                    const q = `SET MARKUP CSV ON QUOTE OFF\nSET PAGESIZE 50000\nSELECT username FROM all_users ORDER BY username;\n/\nEXIT\n`;
+                    const q = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT DISTINCT username FROM all_users ORDER BY username;\nEXIT\n`;
                     fs.writeFileSync(tmpFile, q, 'utf-8');
                     const cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                     const stdout = await new Promise<string>((resolve, reject) => {
