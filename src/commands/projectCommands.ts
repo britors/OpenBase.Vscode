@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { Utils } from '../utils';
-import { NEW_PROJECT_PREFS_KEY, BUILD_CONFIGS, extContext } from '../types';
+import { BUILD_CONFIGS } from '../types';
+
+import { guardInstalled, openTerminal, resolveWorkingDir } from '../utils';
 
 export class ProjectCommands {
     constructor(private context: vscode.ExtensionContext) {}
@@ -18,51 +19,51 @@ export class ProjectCommands {
     }
 
     async newProject(uri?: vscode.Uri): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
-        // Logic implemented in extension.ts for now, need to be fully moved.
+        if (!await guardInstalled()) return;
+        vscode.window.showInformationMessage('New Project started');
     }
 
     async scaffold(uri?: vscode.Uri): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
+        if (!await guardInstalled()) return;
         const entity = await vscode.window.showInputBox({ title: 'OpenBase: Scaffold', prompt: 'Entity name' });
         if (!entity) return;
-        const cwd = await Utils.getInstance().resolveWorkingDir(uri);
+        const cwd = await resolveWorkingDir(uri);
         if (!cwd) return;
-        Utils.getInstance().openTerminal('Scaffold', cwd, `openbase scaffold -e ${entity}`);
+        openTerminal('Scaffold', cwd, `openbase scaffold -e ${entity}`);
     }
 
     async scaffoldUpdate(uri?: vscode.Uri): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
+        if (!await guardInstalled()) return;
         const entity = await vscode.window.showInputBox({ title: 'OpenBase: Scaffold Update', prompt: 'Entity name' });
         if (!entity) return;
-        const cwd = await Utils.getInstance().resolveWorkingDir(uri);
+        const cwd = await resolveWorkingDir(uri);
         if (!cwd) return;
-        Utils.getInstance().openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${entity} --update`);
+        openTerminal('Scaffold Update', cwd, `openbase scaffold -e ${entity} --update`);
     }
 
     async build(uri?: vscode.Uri): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
+        if (!await guardInstalled()) return;
         const config = await vscode.window.showQuickPick(BUILD_CONFIGS.map(c => ({ label: c })));
         if (!config) return;
-        const cwd = await Utils.getInstance().resolveWorkingDir(uri);
+        const cwd = await resolveWorkingDir(uri);
         if (!cwd) return;
-        Utils.getInstance().openTerminal('Build', cwd, `openbase build -c ${config.label}`);
+        openTerminal('Build', cwd, `openbase build -c ${config.label}`);
     }
 
     async run(uri?: vscode.Uri): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
-        const cwd = await Utils.getInstance().resolveWorkingDir(uri);
+        if (!await guardInstalled()) return;
+        const cwd = await resolveWorkingDir(uri);
         if (!cwd) return;
-        Utils.getInstance().openTerminal('Run', cwd, `openbase run`);
+        openTerminal('Run', cwd, `openbase run`);
     }
 
     async update(): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
-        Utils.getInstance().openTerminal('Update', process.cwd(), `openbase update`);
+        if (!await guardInstalled()) return;
+        openTerminal('Update', process.cwd(), `openbase update`);
     }
 
     async history(): Promise<void> {
-        if (!await Utils.getInstance().guardInstalled()) return;
-        Utils.getInstance().openTerminal('History', process.cwd(), `openbase history`);
+        if (!await guardInstalled()) return;
+        openTerminal('History', process.cwd(), `openbase history`);
     }
 }

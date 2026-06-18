@@ -4,9 +4,7 @@ import * as os from 'os';
 
 export class Utils {
     private static instance: Utils;
-
     private constructor() {}
-
     public static getInstance(): Utils {
         if (!Utils.instance) {
             Utils.instance = new Utils();
@@ -14,10 +12,7 @@ export class Utils {
         return Utils.instance;
     }
 
-    dotnetToolsPath(): string {
-        return path.join(os.homedir(), '.dotnet', 'tools');
-    }
-
+    dotnetToolsPath(): string { return path.join(os.homedir(), '.dotnet', 'tools'); }
     openTerminal(name: string, cwd: string, command: string): void {
         const extraPath = this.dotnetToolsPath();
         const currentPath = process.env.PATH ?? '';
@@ -29,29 +24,21 @@ export class Utils {
         terminal.show();
         terminal.sendText(command);
     }
-
-    async guardInstalled(): Promise<boolean> {
-        return true;
-    }
-
+    async guardInstalled(): Promise<boolean> { return true; }
     async resolveWorkingDir(uri?: vscode.Uri): Promise<string | undefined> {
         if (uri) return uri.fsPath;
         const folders = vscode.workspace.workspaceFolders;
         return folders ? folders[0].uri.fsPath : undefined;
     }
-
     dbTemplateLabel(t: string): string { return t; }
     extensionLabel(e: string): string { return e; }
-
     getScriptsDir(): string | undefined {
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         return cwd ? path.join(cwd, '.openbase', 'sql-runner', 'scripts') : undefined;
     }
-
     async promptScriptName(prompt: string, value?: string): Promise<string | undefined> {
         return await vscode.window.showInputBox({ prompt, value });
     }
-
     getNonce(): string {
         let text = '';
         const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -59,3 +46,14 @@ export class Utils {
         return text;
     }
 }
+
+// Shims for backward compatibility
+export const dotnetToolsPath = () => Utils.getInstance().dotnetToolsPath();
+export const openTerminal = (name: string, cwd: string, command: string) => Utils.getInstance().openTerminal(name, cwd, command);
+export const guardInstalled = () => Utils.getInstance().guardInstalled();
+export const resolveWorkingDir = (uri?: vscode.Uri) => Utils.getInstance().resolveWorkingDir(uri);
+export const dbTemplateLabel = (t: string) => Utils.getInstance().dbTemplateLabel(t);
+export const extensionLabel = (e: string) => Utils.getInstance().extensionLabel(e);
+export const getScriptsDir = () => Utils.getInstance().getScriptsDir();
+export const promptScriptName = (prompt: string, value?: string) => Utils.getInstance().promptScriptName(prompt, value);
+export const getNonce = () => Utils.getInstance().getNonce();
