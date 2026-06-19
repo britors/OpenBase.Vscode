@@ -85,17 +85,6 @@ Exemplo: `@openbase implemente a issue #feature/101`
 1. Open the Command Palette → **Debug** (or use the **Solution Explorer** sidebar).
 2. Requires **C# Dev Kit** or **C# (OmniSharp)**.
 
-## Compilação
-
-Para compilar o projeto localmente, execute os comandos abaixo no diretório `OpenBase.Vscode`:
-
-```bash
-npm install
-npm run compile
-```
-
-> O script de compilação usa o TypeScript Compiler configurado em `tsconfig.json`.
-
 ## Development
 
 ```bash
