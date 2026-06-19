@@ -3987,9 +3987,8 @@ async function loadTableDetails(
             break;
         }
         case 'oracle': {
-            const colQ = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT COLUMN_NAME || '|' || DATA_TYPE || '|' || CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END || '|' || NULLABLE FROM ALL_TAB_COLUMNS WHERE OWNER='${s.toUpperCase()}' AND TABLE_NAME='${t.toUpperCase()}' ORDER BY COLUMN_ID;\nEXIT\n`;
+            const colQ = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT COLUMN_NAME || '|' || DATA_TYPE || '|' || CASE WHEN DATA_PRECISION IS NOT NULL THEN TO_CHAR(DATA_PRECISION) ELSE TO_CHAR(DATA_LENGTH) END || '|' || NULLABLE FROM ALL_TAB_COLUMNS WHERE UPPER(OWNER)='${s.toUpperCase()}' AND UPPER(TABLE_NAME)='${t.toUpperCase()}' ORDER BY COLUMN_ID;\nEXIT\n`;
             const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s.toUpperCase()}' AND uc.TABLE_NAME='${t.toUpperCase()}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
-            console.log(`Oracle Column Query Content: ${colQ}`);
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
             colCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
@@ -4040,11 +4039,11 @@ async function loadTableDetails(
                 refColumn: (r[5] ?? '').trim(),
             };
         });
-
         const columns: TableColumn[] = parseRows(colOut, conn.type === 'oracle' ? 4 : 5).map(r => ({
             name: r[0] ?? '',
             type: r[1] ?? '',
             size: r[2] ?? '',
+        
             nullable: conn.type === 'oracle'
                 ? (r[3] === 'N' ? 'NO' : 'YES')
                 : (r[3] ?? ''),
