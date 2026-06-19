@@ -10,12 +10,10 @@ import { execSync, exec, spawn } from 'child_process';
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
 const EXTENSIONS = ['jwt', 'redis', 'healthchecks', 'mongodb', 'domainevents'] as const;
-const SPECIALIST_TYPES = ['query', 'command', 'httpcall'] as const;
 const PARAM_TYPES = ['string', 'int', 'bool', 'decimal', 'Guid', 'DateTime', 'long', 'double', 'float', 'short'] as const;
 const EXTENSION_PROVIDERS: Partial<Record<string, string[]>> = {};
 
 type DbTemplate = typeof DB_TEMPLATES[number];
-type BuildConfig = typeof BUILD_CONFIGS[number];
 
 function dotnetToolsPath(): string {
     return path.join(os.homedir(), '.dotnet', 'tools');
@@ -1432,14 +1430,6 @@ function findConnection(cwd: string): DbConnection | undefined {
     } catch { /* ignore */ }
 }
 
-function buildOracleConnString(conn: DbConnection): string {
-    const user = conn.user ?? '';
-    const pass = conn.password ?? '';
-    const isSys = user.toLowerCase() === 'sys';
-    const role = isSys ? ' AS SYSDBA' : '';
-    // Quote password to support special characters like '@'
-    return `"${user}/\\"${pass}\\"@${conn.server}${role}"`;
-}
 
 function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: string[]; rows: string[][]; message?: string } {
     const lines = raw.split('\n').map(l => l.trimEnd()).filter(Boolean);
@@ -2657,7 +2647,7 @@ let httpPanel: vscode.WebviewPanel | undefined;
 function ensureLocalEnv(baseUrl: string): void {
     const dir = getEnvsDir();
     if (!dir) return;
-    const url = baseUrl || 'https://localhost:5000';
+    const url = baseUrl || 'https://localhost:7215';
     const localFile = path.join(dir, 'local.json');
     if (fs.existsSync(localFile)) {
         try {
@@ -2769,7 +2759,7 @@ async function httpRunner(): Promise<void> {
             const filepath = path.join(dir, filename);
             if (fs.existsSync(filepath)) { vscode.window.showErrorMessage(`Environment "${filename}" already exists.`); return; }
             fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(filepath, JSON.stringify({ name: name.trim(), variables: { baseUrl: 'http://localhost:5000', token: '' } }, null, 2), 'utf-8');
+            fs.writeFileSync(filepath, JSON.stringify({ name: name.trim(), variables: { baseUrl: 'http://localhost:7215', token: '' } }, null, 2), 'utf-8');
             await vscode.window.showTextDocument(vscode.Uri.file(filepath));
             return;
         }
@@ -3033,7 +3023,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <option>GET</option><option>POST</option><option>PUT</option>
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
-  <input id="url-input" type="text" placeholder="https://localhost:5000/api/...">
+  <input id="url-input" type="text" placeholder="https://localhost:7215/api/...">
   <button id="send-btn" class="btn btn-primary">▶ Send</button>
   <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
   <button id="import-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Import from cURL command">↓ cURL</button>
@@ -3843,18 +3833,10 @@ async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise
                 const schema = targetSchema ? targetSchema.toUpperCase() : (conn.user || '').toUpperCase();
                 const q = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF
 SET PAGESIZE 50000
-SELECT OWNER, TABLE_NAME AS NAME, 'TABLE' AS OBJECT_TYPE FROM ALL_TABLES WHERE OWNER = '${schema}'
-UNION ALL
-SELECT OWNER, OBJECT_NAME AS NAME, OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER = '${schema}' AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
-ORDER BY OWNER, OBJECT_TYPE, NAME;
+SELECT OWNER, TABLE_NAME AS NAME, 'TABLE' AS OBJECT_TYPE FROM ALL_TABLES WHERE OWNER = '${schema}' ORDER BY TABLE_NAME
 /
 EXIT
 `;
-                
-                console.log('--- GENERATED ORACLE QUERY SCRIPT CONTENT ---');
-                console.log(q);
-                console.log('----------------------------------------------');
-                
                 fs.writeFileSync(tmpFile, q, 'utf-8');
                 cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
@@ -3863,23 +3845,21 @@ EXIT
         
         const stdout = await new Promise<string>((resolve, reject) => {
             exec(cmd, { env, timeout: 15000 }, (err, out, stderr) => {
-                console.log('--- EXEC COMPLETED ---');
-                if (err) console.error('EXEC ERROR:', err);
-                if (stderr) console.error('EXEC STDERR:', stderr);
+                console.log('EXEC CMD:', cmd);
                 console.log('EXEC STDOUT:', out);
+                console.log('EXEC STDERR:', stderr);
+                if (err) console.log('EXEC ERROR:', err);
+                if (stderr) console.log('EXEC STDERR:', stderr);
                 
                 if (err && !out) reject(new Error(stderr || err.message));
                 else resolve(out);
             });
         });
 
-        console.log('--- RAW SQL OUTPUT (CAPTURED) ---');
-        console.log(stdout);
-        console.log('---------------------------------');
-
         const result = new Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>();
         const sep = conn.type === 'pgsql' ? ',' : '|';
 
+        
         for (const raw of stdout.split('\n')) {
             const line = raw.trim();
             if (!line || line.startsWith('---') || /^\d+ rows? selected/i.test(line)) continue;
@@ -7548,19 +7528,6 @@ class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> 
     }
 }
 
-function seReadLaunchUrl(projDir: string): string | undefined {
-    try {
-        const raw = fs.readFileSync(path.join(projDir, 'Properties', 'launchSettings.json'), 'utf-8');
-        const json = JSON.parse(raw);
-        for (const profile of Object.values(json?.profiles ?? {}) as Record<string, string>[]) {
-            if (profile.applicationUrl) {
-                const urls = profile.applicationUrl.split(';');
-                return urls.find(u => u.startsWith('https')) ?? urls[0];
-            }
-        }
-    } catch {}
-    return undefined;
-}
 
 function writePubxml(profilesDir: string, name: string, content: string): void {
     fs.mkdirSync(profilesDir, { recursive: true });
@@ -7856,7 +7823,7 @@ class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
             const stdout = await new Promise<string>((resolve, reject) => {
                 const extraPath = dotnetToolsPath();
                 const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-                exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out, stderr) => {
+                exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out) => {
                     if (err) reject(err);
                     else resolve(out);
                 });
