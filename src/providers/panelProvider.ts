@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { Utils } from '../utils';
 
 export class OpenBasePanelProvider implements vscode.WebviewViewProvider {
     static readonly viewType = 'openbase.panel';

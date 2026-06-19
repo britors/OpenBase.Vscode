@@ -883,8 +883,8 @@
     "lint": "eslint src"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
     "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
