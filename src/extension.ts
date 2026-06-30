@@ -1,7 +1,19 @@
-import * as vscode from 'vscode';
+﻿import * as vscode from 'vscode';
 import { OpenBaseOrchestrator } from './orchestrators/openBaseOrchestrator';
 import { OpenBasePanelProvider } from './providers/openBasePanelProvider';
 import { SqlRunnerProvider } from './providers/sqlRunnerProvider';
+import { setupTaskRunner } from './providers/taskRunnerProvider';
+import { setupStatusBar } from './providers/statusBarProvider';
+import { setupSolutionExplorer } from './providers/solutionExplorerProvider';
+import { setupSqlTableBrowser } from './providers/sqlTableBrowserProvider';
+import { HttpRequestData, getRequestsDir, setupHttpRequestLibrary } from './providers/httpRequestLibraryProvider';
+import { setupEndpointsMap } from './providers/endpointsMapProvider';
+import { setupMigrationRunner } from './providers/migrationRunnerProvider';
+import { setupDepInspector } from './providers/dependencyInspectorProvider';
+import { setupMonitor } from './providers/monitorProvider';
+import { setupLogViewer } from './providers/logViewerProvider';
+import { RunnerSidebarProvider } from './providers/runnerSidebarProvider';
+import { getScriptsDir, promptScriptName, setupSqlScriptLibrary } from './providers/sqlScriptLibraryProvider';
 import { DbConnection } from './models/dbConnection';
 import { ConnectionService } from './services/connection.service';
 import { SqlRunnerService } from './services/sqlRunner.service';
@@ -117,9 +129,9 @@ function findEntryProject(workspaceRoot: string): { csprojPath: string; targetFr
         return { csprojPath: preferred, targetFramework: tfm, assemblyName };
 }
 
-// ─── panel moved to providers/openBasePanelProvider.ts ─────────────────────
+// â”€â”€â”€ panel moved to providers/openBasePanelProvider.ts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ─── sql runner ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ sql runner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function findConnection(cwd: string): DbConnection | undefined {
         return connectionService.findConnection(cwd);
@@ -185,7 +197,7 @@ interface HttpHistoryEntry {
         responseTimeMs: number;
 }
 
-// ─── http runner ─────────────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ http runner ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 interface HttpResult {
     status: number;
@@ -269,6 +281,7 @@ function detectApiUrl(cwd: string): string {
 }
 
 let httpPanel: vscode.WebviewPanel | undefined;
+let httpPendingRequest: HttpRequestData | undefined;
 
 function ensureLocalEnv(baseUrl: string): void {
     const dir = getEnvsDir();
@@ -410,7 +423,7 @@ async function httpRunner(): Promise<void> {
             const data = { method: msg.method, url: msg.url, headers: msg.headers, bodyType: msg.bodyType, body: msg.body, authToken: msg.authToken };
             fs.writeFileSync(path.join(requestsDir, safeName), JSON.stringify(data, null, 2), 'utf-8');
             vscode.window.showInformationMessage(`Request saved: ${safeName}`);
-            httpRequestProvider?.refresh();
+            void vscode.commands.executeCommand('openbase.httpRunner.requests.refresh');
             return;
         }
 
@@ -545,7 +558,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   .spinner{display:inline-block;width:11px;height:11px;border:2px solid var(--vscode-foreground);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* ── OpenBase brand theme ── */
+  /* ÔöÇÔöÇ OpenBase brand theme ÔöÇÔöÇ */
   :root{
     --ob-bg0: var(--vscode-editor-background);
     --ob-bg1: var(--vscode-sideBar-background);
@@ -650,10 +663,10 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
   </select>
   <input id="url-input" type="text" placeholder="https://localhost:7215/api/...">
-  <button id="send-btn" class="btn btn-primary">▶ Send</button>
-  <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">Save…</button>
-  <button id="import-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Import from cURL command">↓ cURL</button>
-  <button id="copy-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Copy as cURL">↑ cURL</button>
+  <button id="send-btn" class="btn btn-primary">ÔûÂ Send</button>
+  <button id="save-req-btn" class="btn btn-secondary" title="Save request to library">SaveÔÇª</button>
+  <button id="import-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Import from cURL command">Ôåô cURL</button>
+  <button id="copy-curl-btn" class="btn btn-secondary" style="font-size:10px;padding:2px 7px" title="Copy as cURL">Ôåæ cURL</button>
   <button id="http-history-btn" class="btn btn-secondary" title="Show request history">History</button>
 </div>
 
@@ -661,7 +674,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 <div class="env-bar">
   <span class="env-label">Env</span>
   <select id="env-select">
-    <option value="">— none —</option>
+    <option value="">ÔÇö none ÔÇö</option>
   </select>
   <span id="env-var-count" class="env-var-count"></span>
   <button id="new-env-btn" class="btn btn-secondary" style="margin-left:auto;font-size:10px;padding:1px 8px" title="Create new environment file">+ New Env</button>
@@ -694,7 +707,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
   </div>
 
   <div id="req-auth" class="tab-content hidden">
-    <p class="auth-label">Bearer Token — automatically added as Authorization header on send</p>
+    <p class="auth-label">Bearer Token ÔÇö automatically added as Authorization header on send</p>
     <input id="auth-token" type="password" style="width:100%" placeholder="eyJhbGci...">
     <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
       <input id="auth-show" type="checkbox" style="width:auto">
@@ -794,8 +807,8 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     if (!curl) return;
     navigator.clipboard.writeText(curl).then(function() {
       var btn = document.getElementById('copy-curl-btn');
-      btn.textContent = '✓ ok';
-      setTimeout(function() { btn.textContent = '↑ cURL'; }, 1500);
+      btn.textContent = 'Ô£ô ok';
+      setTimeout(function() { btn.textContent = 'Ôåæ cURL'; }, 1500);
     });
   });
   document.getElementById('env-select').addEventListener('change', function() {
@@ -1020,7 +1033,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     if (m.command === 'loadRequest') { loadHistoryEntry(m); return; }
     if (m.command === 'loadEnvs') {
       var sel = document.getElementById('env-select');
-      sel.innerHTML = '\x3coption value="">— none —\x3c/option>';
+      sel.innerHTML = '\x3coption value="">ÔÇö none ÔÇö\x3c/option>';
       (m.envs || []).forEach(function(env) {
         var opt = document.createElement('option');
         opt.value = env.filename;
@@ -1167,7 +1180,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
     document.getElementById('http-history-panel').classList.toggle('hidden', !httpHistoryVisible);
     document.querySelector('.req-section').classList.toggle('hidden', httpHistoryVisible);
     document.querySelector('.res-section').classList.toggle('hidden', httpHistoryVisible);
-    document.getElementById('http-history-btn').textContent = httpHistoryVisible ? '« Back' : 'History';
+    document.getElementById('http-history-btn').textContent = httpHistoryVisible ? '┬½ Back' : 'History';
   }
 
   function loadHistoryEntry(entry) {
@@ -1213,7 +1226,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
             + '\x3cbutton class="btn btn-secondary hist-load-btn" data-idx="' + i + '">Load\x3c/button>'
             + '\x3cbutton class="btn btn-secondary hist-resend-btn" data-idx="' + i + '">Resend\x3c/button>'
             + '\x3cbutton class="btn btn-secondary hist-save-btn" data-idx="' + i + '">Save\x3c/button>'
-            + '\x3cbutton class="http-hist-expand">' + (expanded ? '▼' : '▶') + '\x3c/button>'
+            + '\x3cbutton class="http-hist-expand">' + (expanded ? 'Ôû╝' : 'ÔûÂ') + '\x3c/button>'
             + '\x3c/div>'
             + '\x3c/div>';
       if (expanded && e.responseBody) {
@@ -1255,42 +1268,7 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 </html>`;
 }
 
-// ─── runner sidebar (shared) ──────────────────────────────────────────────────
-
-class RunnerSidebarProvider implements vscode.WebviewViewProvider {
-    constructor(
-        private readonly label: string,
-        private readonly btnLabel: string,
-        private readonly open: () => void
-    ) {}
-
-    resolveWebviewView(view: vscode.WebviewView): void {
-        view.webview.options = { enableScripts: true };
-        view.webview.html = this._html();
-        view.onDidChangeVisibility(() => { if (view.visible) this.open(); });
-        view.webview.onDidReceiveMessage((msg) => { if (msg.command === 'open') this.open(); });
-    }
-
-    private _html(): string {
-        return /* html */`<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
-  body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:16px;text-align:center}
-  p{color:var(--vscode-descriptionForeground);font-size:12px;margin-bottom:12px}
-  button{padding:6px 12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-family:inherit;font-size:inherit;width:100%}
-  button:hover{background:var(--vscode-button-hoverBackground)}
-</style></head>
-<body>
-  <p>Click below to open ${this.label} in the editor.</p>
-  <button onclick="vscode.postMessage({command:'open'})">${this.btnLabel}</button>
-  <script>const vscode = acquireVsCodeApi();</script>
-</body></html>`;
-    }
-}
-
-// ─── SQL table browser ───────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ SQL table browser ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 type TableItemKind = 'schema' | 'table' | 'procedure' | 'message';
 
@@ -1356,7 +1334,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
         this.selectedSchema = schema;
         this.schemas.clear();
         this.state = 'loading';
-        if (this.treeView) this.treeView.message = 'Loading tables…';
+        if (this.treeView) this.treeView.message = 'Loading tablesÔÇª';
         this._onDidChangeTreeData.fire();
 
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -1386,7 +1364,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
     getTreeItem(e: SqlTableItem): vscode.TreeItem { return e; }
 
     getChildren(element?: SqlTableItem): vscode.ProviderResult<SqlTableItem[]> {
-        if (this.state === 'loading') return [new SqlTableItem('message', 'Loading…')];
+        if (this.state === 'loading') return [new SqlTableItem('message', 'LoadingÔÇª')];
         if (this.state === 'error') return [new SqlTableItem('message', `Error: ${this.errorMsg}`)];
         if (this.state === 'noconn') return [];
 
@@ -1521,7 +1499,7 @@ function buildSelectQuery(schema: string, table: string, dbType: DbTemplate): st
     }
 }
 
-// ─── SQL Table Inspector ──────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ SQL Table Inspector ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 interface TableColumn {
     name: string;
@@ -1896,7 +1874,7 @@ function buildTableInspectorErrorHtml(nonce: string, cspSource: string, schema: 
 </html>`;
 }
 
-// ─── ER Diagram ───────────────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ ER Diagram ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 function buildErDiagramLoadingHtml(nonce: string, cspSource: string): string {
     return `<!DOCTYPE html>
@@ -2243,7 +2221,7 @@ async function openErDiagram(): Promise<void> {
     }
 }
 
-// ─── Log Viewer ──────────────────────────────────────────────────────────────
+// ÔöÇÔöÇÔöÇ Log Viewer ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 let logPanel: vscode.WebviewPanel | undefined;
 let logProcess: import('child_process').ChildProcess | undefined;
@@ -2609,7 +2587,7 @@ async function openTableInspector(
     panel.webview.onDidReceiveMessage(async (msg: { command: string; entity?: string }) => {
         if (msg.command === 'runSelect') {
             const sql = buildSelectQuery(schema, table, dbType);
-            await openScriptInSqlRunner('', sql);
+        await sqlRunnerProvider?.openScript(sql, '');
             return;
         }
         if (msg.command === 'scaffold' || msg.command === 'scaffoldUpdate') {
@@ -2680,274 +2658,7 @@ async function openTableInspector(
     }
 }
 
-let sqlTableProvider: SqlTableTreeProvider | undefined;
-
-function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
-    sqlTableProvider = new SqlTableTreeProvider();
-
-    const treeView = vscode.window.createTreeView('openbase.sqlrunner.tables', {
-        treeDataProvider: sqlTableProvider,
-        showCollapseAll: true,
-    });
-    sqlTableProvider.setTreeView(treeView);
-    context.subscriptions.push(treeView);
-
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(() => sqlTableProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.changeSchema', async () => {
-            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-            const conn = cwd ? findConnection(cwd) : undefined;
-            if (!conn) {
-                vscode.window.showErrorMessage('No connection found.');
-                return;
-            }
-            
-            let schemas: string[] = [];
-            const tmpFile = path.join(os.tmpdir(), `ob_schemas_${Date.now()}.sql`);
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
-            try {
-                if (conn.type === 'oracle') {
-                    const q = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT DISTINCT username FROM all_users ORDER BY username;\nEXIT\n`;
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
-                    });
-                    schemas = stdout.trim().split('\n').filter(s => s.trim() && !s.includes('USERNAME')).map(s => s.trim());
-                } else if (conn.type === 'pgsql') {
-                    const q = `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name`;
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const port = conn.port ?? '5432';
-                    const u = encodeURIComponent(conn.user ?? 'postgres');
-                    const p = encodeURIComponent(conn.password ?? '');
-                    const cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" -t -A -f "${tmpFile}"`;
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
-                    });
-                    schemas = stdout.trim().split('\n').filter(s => s.trim()).map(s => s.trim());
-                } else if (conn.type === 'sqlserver') {
-                    const q = `SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name`;
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                    if (conn.user)     parts.push(`-U "${conn.user}"`);
-                    if (conn.password) parts.push(`-P "${conn.password}"`);
-                    parts.push(`-i "${tmpFile}" -W -h -1`);
-                    const cmd = parts.join(' ');
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
-                    });
-                    schemas = stdout.trim().split('\n').filter(s => s.trim()).map(s => s.trim());
-                }
-                
-                const selected = await vscode.window.showQuickPick(schemas, { placeHolder: 'Select a schema' });
-                if (selected) {
-                    await sqlTableProvider?.refresh(selected);
-                }
-            } catch (e) {
-                vscode.window.showErrorMessage('Failed to fetch schemas: ' + (e instanceof Error ? e.message : String(e)));
-            } finally {
-                try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-            }
-        }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.refresh',
-            () => sqlTableProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.select',
-            async (item: SqlTableItem) => {
-                if (item.kind !== 'table' || !item.schema || !item.dbType) return;
-                const sql = buildSelectQuery(item.schema, item.label as string, item.dbType);
-                await openScriptInSqlRunner('', sql);
-            }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.inspect',
-            async (item: SqlTableItem) => {
-                if (item.kind !== 'table' || !item.schema || !item.dbType) return;
-                const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                const conn = cwd ? findConnection(cwd) : undefined;
-                if (!conn) {
-                    vscode.window.showErrorMessage('No database connection found in workspace.');
-                    return;
-                }
-                await openTableInspector(conn, item.schema, item.label as string, item.dbType);
-            }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.erDiagram', () => openErDiagram()),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.filter', () => {
-            const inputBox = vscode.window.createInputBox();
-            inputBox.placeholder = 'Filter tables...';
-            inputBox.value = sqlTableProvider?.filterText ?? '';
-            inputBox.onDidChangeValue(text => sqlTableProvider?.setFilter(text));
-            inputBox.onDidAccept(() => inputBox.hide());
-            inputBox.onDidHide(() => inputBox.dispose());
-            inputBox.show();
-        }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.tables.clearFilter', () => {
-            sqlTableProvider?.setFilter('');
-        }),
-    );
-
-    sqlTableProvider.refresh();
-}
-
-// ─── SQL script library ───────────────────────────────────────────────────────
-
-const SQL_SCRIPTS_SUBDIR = path.join('.openbase', 'sql-runner', 'scripts');
-
-function getScriptsDir(): string | undefined {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    return cwd ? path.join(cwd, SQL_SCRIPTS_SUBDIR) : undefined;
-}
-
-let sqlScriptProvider: SqlScriptTreeProvider | undefined;
-
-type ScriptItemKind = 'script' | 'folder';
-
-class SqlScriptItem extends vscode.TreeItem {
-    constructor(
-        public readonly fsPath: string,
-        public readonly kind: ScriptItemKind,
-    ) {
-        const basename = path.basename(fsPath);
-        const label = kind === 'script' ? basename.replace(/\.sql$/i, '') : basename;
-        super(label, kind === 'folder'
-            ? vscode.TreeItemCollapsibleState.Collapsed
-            : vscode.TreeItemCollapsibleState.None);
-        this.contextValue = kind;
-        this.tooltip = basename;
-        if (kind === 'script') {
-            this.command = {
-                command: 'openbase.sqlRunner.scripts.open',
-                title: 'Open in SQL Runner',
-                arguments: [this],
-            };
-            this.iconPath = new vscode.ThemeIcon('file-code');
-        } else {
-            this.iconPath = vscode.ThemeIcon.Folder;
-        }
-    }
-}
-
-class SqlScriptTreeProvider implements vscode.TreeDataProvider<SqlScriptItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<SqlScriptItem | undefined | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    refresh(): void { this._onDidChangeTreeData.fire(); }
-
-    getTreeItem(e: SqlScriptItem): vscode.TreeItem { return e; }
-
-    getChildren(element?: SqlScriptItem): vscode.ProviderResult<SqlScriptItem[]> {
-        const dir = element ? element.fsPath : getScriptsDir();
-        if (!dir || !fs.existsSync(dir)) return [];
-        try {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            const folders = entries
-                .filter(e => e.isDirectory())
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(e => new SqlScriptItem(path.join(dir, e.name), 'folder'));
-            const scripts = entries
-                .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.sql'))
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(e => new SqlScriptItem(path.join(dir, e.name), 'script'));
-            return [...folders, ...scripts];
-        } catch { return []; }
-    }
-}
-
-async function openScriptInSqlRunner(filePath: string, directContent?: string): Promise<void> {
-    const content = directContent ?? fs.readFileSync(filePath, 'utf-8');
-    const name = directContent ? '' : path.basename(filePath);
-    await sqlRunnerProvider?.openScript(content, name);
-}
-
-async function promptScriptName(prompt: string, initial?: string): Promise<string | undefined> {
-    const raw = await vscode.window.showInputBox({
-        prompt,
-        value: initial,
-        placeHolder: 'my-query',
-        validateInput: v => v?.trim() && /^[^\\/:\*\?"<>\|]+$/.test(v.trim()) ? undefined : 'Invalid name',
-    });
-    return raw?.trim();
-}
-
-function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
-    sqlScriptProvider = new SqlScriptTreeProvider();
-
-    context.subscriptions.push(
-        vscode.window.createTreeView('openbase.sqlrunner.scripts', {
-            treeDataProvider: sqlScriptProvider,
-            showCollapseAll: true,
-        }),
-
-        (() => {
-            const w = vscode.workspace.createFileSystemWatcher(`**/${SQL_SCRIPTS_SUBDIR}/**`);
-            w.onDidCreate(() => sqlScriptProvider?.refresh());
-            w.onDidDelete(() => sqlScriptProvider?.refresh());
-            w.onDidChange(() => sqlScriptProvider?.refresh());
-            return w;
-        })(),
-
-        vscode.workspace.onDidChangeWorkspaceFolders(() => sqlScriptProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.refresh',
-            () => sqlScriptProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.new',
-            async (item?: SqlScriptItem) => {
-                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getScriptsDir();
-                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-                const name = await promptScriptName('Script name');
-                if (!name) return;
-                const file = path.join(baseDir, name.replace(/\.sql$/i, '') + '.sql');
-                if (fs.existsSync(file)) { vscode.window.showErrorMessage(`"${path.basename(file)}" already exists.`); return; }
-                fs.mkdirSync(baseDir, { recursive: true });
-                fs.writeFileSync(file, '', 'utf-8');
-                sqlScriptProvider?.refresh();
-                await openScriptInSqlRunner(file);
-            }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.newFolder',
-            async (item?: SqlScriptItem) => {
-                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getScriptsDir();
-                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-                const name = await promptScriptName('Folder name');
-                if (!name) return;
-                fs.mkdirSync(path.join(baseDir, name), { recursive: true });
-                sqlScriptProvider?.refresh();
-            }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.open',
-            async (item: SqlScriptItem) => openScriptInSqlRunner(item.fsPath)),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.rename',
-            async (item: SqlScriptItem) => {
-                const old = path.basename(item.fsPath);
-                const display = item.kind === 'script' ? old.replace(/\.sql$/i, '') : old;
-                const name = await promptScriptName('Rename to', display);
-                if (!name || name === display) return;
-                const newName = item.kind === 'script' ? name.replace(/\.sql$/i, '') + '.sql' : name;
-                fs.renameSync(item.fsPath, path.join(path.dirname(item.fsPath), newName));
-                sqlScriptProvider?.refresh();
-            }),
-
-        vscode.commands.registerCommand('openbase.sqlRunner.scripts.delete',
-            async (item: SqlScriptItem) => {
-                const name = path.basename(item.fsPath);
-                const ans = await vscode.window.showWarningMessage(`Delete "${name}"?`, { modal: true }, 'Delete');
-                if (ans !== 'Delete') return;
-                if (item.kind === 'folder') fs.rmSync(item.fsPath, { recursive: true, force: true });
-                else fs.unlinkSync(item.fsPath);
-                sqlScriptProvider?.refresh();
-            }),
-    );
-}
-
-// ─── OpenAPI / Swagger import ─────────────────────────────────────────────────
+// â”€â”€â”€ OpenAPI / Swagger import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface OApiSchema {
     type?: string;
@@ -3150,2428 +2861,11 @@ async function importSwaggerToHttpRunner(): Promise<void> {
         }
     }
 
-    httpRequestProvider?.refresh();
+    void vscode.commands.executeCommand('openbase.httpRunner.requests.refresh');
     vscode.window.showInformationMessage(`Imported ${created} request${created !== 1 ? 's' : ''} from "${apiTitle}" into "${folderName}".`);
 }
 
-// ─── HTTP request library ─────────────────────────────────────────────────────
-
-const HTTP_REQUESTS_SUBDIR = path.join('.openbase', 'http-runner', 'requests');
-
-function getRequestsDir(): string | undefined {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    return cwd ? path.join(cwd, HTTP_REQUESTS_SUBDIR) : undefined;
-}
-
-interface HttpRequestData {
-    method?: string;
-    url?: string;
-    headers?: Array<{name: string; value: string}>;
-    bodyType?: string;
-    body?: string;
-    authToken?: string;
-}
-
-let httpPendingRequest: HttpRequestData | undefined;
-let httpRequestProvider: HttpRequestTreeProvider | undefined;
-
-class HttpRequestItem extends vscode.TreeItem {
-    constructor(
-        public readonly fsPath: string,
-        public readonly kind: ScriptItemKind,
-    ) {
-        const basename = path.basename(fsPath);
-        const label = kind === 'script' ? basename.replace(/\.json$/i, '') : basename;
-        super(label, kind === 'folder'
-            ? vscode.TreeItemCollapsibleState.Collapsed
-            : vscode.TreeItemCollapsibleState.None);
-        this.contextValue = kind;
-        this.tooltip = basename;
-        if (kind === 'script') {
-            this.command = {
-                command: 'openbase.httpRunner.requests.open',
-                title: 'Open in HTTP Runner',
-                arguments: [this],
-            };
-            this.iconPath = new vscode.ThemeIcon('globe');
-        } else {
-            this.iconPath = vscode.ThemeIcon.Folder;
-        }
-    }
-}
-
-class HttpRequestTreeProvider implements vscode.TreeDataProvider<HttpRequestItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<HttpRequestItem | undefined | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    refresh(): void { this._onDidChangeTreeData.fire(); }
-
-    getTreeItem(e: HttpRequestItem): vscode.TreeItem { return e; }
-
-    getChildren(element?: HttpRequestItem): vscode.ProviderResult<HttpRequestItem[]> {
-        const dir = element ? element.fsPath : getRequestsDir();
-        if (!dir || !fs.existsSync(dir)) return [];
-        try {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            const folders = entries
-                .filter(e => e.isDirectory())
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(e => new HttpRequestItem(path.join(dir, e.name), 'folder'));
-            const files = entries
-                .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.json'))
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(e => new HttpRequestItem(path.join(dir, e.name), 'script'));
-            return [...folders, ...files];
-        } catch { return []; }
-    }
-}
-
-async function openRequestInHttpRunner(filePath: string): Promise<void> {
-    let data: HttpRequestData = {};
-    try { data = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { /* use defaults */ }
-    if (httpPanel) {
-        httpPanel.reveal(vscode.ViewColumn.One);
-        httpPanel.webview.postMessage({ command: 'loadRequest', ...data });
-    } else {
-        httpPendingRequest = data;
-        await httpRunner();
-    }
-}
-
-function setupHttpRequestLibrary(context: vscode.ExtensionContext): void {
-    httpRequestProvider = new HttpRequestTreeProvider();
-
-    context.subscriptions.push(
-        vscode.window.createTreeView('openbase.httprunner.requests', {
-            treeDataProvider: httpRequestProvider,
-            showCollapseAll: true,
-        }),
-
-        (() => {
-            const w = vscode.workspace.createFileSystemWatcher(`**/${HTTP_REQUESTS_SUBDIR}/**`);
-            w.onDidCreate(() => httpRequestProvider?.refresh());
-            w.onDidDelete(() => httpRequestProvider?.refresh());
-            w.onDidChange(() => httpRequestProvider?.refresh());
-            return w;
-        })(),
-
-        vscode.workspace.onDidChangeWorkspaceFolders(() => httpRequestProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.refresh',
-            () => httpRequestProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.new',
-            async (item?: HttpRequestItem) => {
-                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getRequestsDir();
-                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-                const name = await promptScriptName('Request name');
-                if (!name) return;
-                const file = path.join(baseDir, name.replace(/\.json$/i, '') + '.json');
-                if (fs.existsSync(file)) { vscode.window.showErrorMessage(`"${path.basename(file)}" already exists.`); return; }
-                fs.mkdirSync(baseDir, { recursive: true });
-                fs.writeFileSync(file, JSON.stringify({ method: 'GET', url: '', headers: [], bodyType: 'none', body: '', authToken: '' }, null, 2), 'utf-8');
-                httpRequestProvider?.refresh();
-                await openRequestInHttpRunner(file);
-            }),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.newFolder',
-            async (item?: HttpRequestItem) => {
-                const baseDir = (item?.kind === 'folder' ? item.fsPath : undefined) ?? getRequestsDir();
-                if (!baseDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-                const name = await promptScriptName('Folder name');
-                if (!name) return;
-                fs.mkdirSync(path.join(baseDir, name), { recursive: true });
-                httpRequestProvider?.refresh();
-            }),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.open',
-            async (item: HttpRequestItem) => openRequestInHttpRunner(item.fsPath)),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.rename',
-            async (item: HttpRequestItem) => {
-                const old = path.basename(item.fsPath);
-                const display = item.kind === 'script' ? old.replace(/\.json$/i, '') : old;
-                const name = await promptScriptName('Rename to', display);
-                if (!name || name === display) return;
-                const newName = item.kind === 'script' ? name.replace(/\.json$/i, '') + '.json' : name;
-                fs.renameSync(item.fsPath, path.join(path.dirname(item.fsPath), newName));
-                httpRequestProvider?.refresh();
-            }),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.delete',
-            async (item: HttpRequestItem) => {
-                const name = path.basename(item.fsPath);
-                const ans = await vscode.window.showWarningMessage(`Delete "${name}"?`, { modal: true }, 'Delete');
-                if (ans !== 'Delete') return;
-                if (item.kind === 'folder') fs.rmSync(item.fsPath, { recursive: true, force: true });
-                else fs.unlinkSync(item.fsPath);
-                httpRequestProvider?.refresh();
-            }),
-
-        vscode.commands.registerCommand('openbase.httpRunner.requests.importSwagger',
-            () => importSwaggerToHttpRunner()),
-    );
-}
-
-// ─── monitor ─────────────────────────────────────────────────────────────────
-
-let monitorPanel: vscode.WebviewPanel | undefined;
-let monitorTimer: ReturnType<typeof setInterval> | undefined;
-let monPrevCpu: { idle: number; total: number } | undefined;
-let monPrevDisk: { r: number; w: number; ts: number } | undefined;
-let monPrevNet: { rx: number; tx: number; ts: number } | undefined;
-let monCountersProcess: ReturnType<typeof spawn> | undefined;
-let monSelectedPid: number | undefined;
-
-function parseDotnetCounters(line: string): Record<string, number> | null {
-    try {
-        const obj = JSON.parse(line) as Record<string, unknown>;
-        const events = (obj['Events'] ?? obj['events'] ?? obj['metrics'] ?? []) as Array<Record<string, unknown>>;
-        if (!Array.isArray(events)) return null;
-        const result: Record<string, number> = {};
-        for (const e of events) {
-            const provider = String(e['Provider'] ?? e['provider'] ?? '');
-            if (provider !== 'System.Runtime') continue;
-            const name = String(e['Name'] ?? e['name'] ?? '');
-            const val = Number(e['Mean'] ?? e['mean'] ?? e['value'] ?? 0);
-            if (name && !isNaN(val)) result[name] = val;
-        }
-        return Object.keys(result).length > 0 ? result : null;
-    } catch { return null; }
-}
-
-function stopMonCounters(): void {
-    if (monCountersProcess) { monCountersProcess.kill(); monCountersProcess = undefined; }
-}
-
-function startMonCounters(pid: number): void {
-    stopMonCounters();
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
-    // Check availability first
-    exec('dotnet-counters --version', { env }, (err) => {
-        if (err) {
-            monitorPanel?.webview.postMessage({
-                command: 'dotnetCountersUnavailable',
-                pid,
-                installCmd: 'dotnet tool install --global dotnet-counters',
-            });
-            return;
-        }
-        const child = spawn('dotnet-counters', [
-            'monitor', '--process-id', String(pid),
-            '--format', 'json',
-            '--counters', 'System.Runtime',
-        ], { env });
-        monCountersProcess = child;
-        let buf = '';
-        child.stdout?.on('data', (data: Buffer) => {
-            buf += data.toString();
-            const lines = buf.split('\n');
-            buf = lines.pop() ?? '';
-            for (const line of lines) {
-                const t = line.trim();
-                if (!t.startsWith('{')) continue;
-                const metrics = parseDotnetCounters(t);
-                if (metrics) monitorPanel?.webview.postMessage({ command: 'dotnetCounters', pid, metrics });
-            }
-        });
-        child.on('exit', () => {
-            monCountersProcess = undefined;
-            if (monSelectedPid === pid) monitorPanel?.webview.postMessage({ command: 'dotnetCountersStopped', pid });
-        });
-        child.on('error', () => {
-            monitorPanel?.webview.postMessage({
-                command: 'dotnetCountersUnavailable',
-                pid,
-                installCmd: 'dotnet tool install --global dotnet-counters',
-            });
-        });
-    });
-}
-
-function monReadCpu(): { idle: number; total: number } | undefined {
-    try {
-        const fields = fs.readFileSync('/proc/stat', 'utf-8').split('\n')[0]
-            .trim().split(/\s+/).slice(1).map(Number);
-        const idle = (fields[3] ?? 0) + (fields[4] ?? 0);
-        return { idle, total: fields.reduce((s, v) => s + v, 0) };
-    } catch { return undefined; }
-}
-
-function monReadMem(): { totalMB: number; usedMB: number } {
-    try {
-        const t = fs.readFileSync('/proc/meminfo', 'utf-8');
-        const n = (k: string) => parseInt(t.match(new RegExp(k + ':\\s*(\\d+)'))?.[1] ?? '0', 10);
-        return { totalMB: Math.round(n('MemTotal') / 1024), usedMB: Math.round((n('MemTotal') - n('MemAvailable')) / 1024) };
-    } catch { return { totalMB: 0, usedMB: 0 }; }
-}
-
-function monReadDisk(): { r: number; w: number } {
-    try {
-        let r = 0, w = 0;
-        for (const line of fs.readFileSync('/proc/diskstats', 'utf-8').split('\n')) {
-            const p = line.trim().split(/\s+/);
-            if (p.length < 14 || !/^(sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z])$/.test(p[2])) continue;
-            r += parseInt(p[5], 10);
-            w += parseInt(p[9], 10);
-        }
-        return { r: r * 512, w: w * 512 };
-    } catch { return { r: 0, w: 0 }; }
-}
-
-function monReadNet(): { rx: number; tx: number } {
-    try {
-        let rx = 0, tx = 0;
-        for (const line of fs.readFileSync('/proc/net/dev', 'utf-8').split('\n').slice(2)) {
-            const colon = line.indexOf(':');
-            if (colon < 0) continue;
-            const iface = line.slice(0, colon).trim();
-            if (iface === 'lo') continue;
-            const parts = line.slice(colon + 1).trim().split(/\s+/);
-            rx += parseInt(parts[0], 10) || 0;
-            tx += parseInt(parts[8], 10) || 0;
-        }
-        return { rx, tx };
-    } catch { return { rx: 0, tx: 0 }; }
-}
-
-function monCollectOs() {
-    const now = Date.now();
-
-    const cpu = monReadCpu();
-    let cpuPct = -1;
-    if (cpu && monPrevCpu) {
-        const dt = cpu.total - monPrevCpu.total;
-        const di = cpu.idle - monPrevCpu.idle;
-        cpuPct = dt > 0 ? Math.max(0, Math.min(100, Math.round(100 * (dt - di) / dt))) : 0;
-    }
-    if (cpu) monPrevCpu = cpu;
-
-    const mem = monReadMem();
-    const memPct = mem.totalMB > 0 ? Math.round(100 * mem.usedMB / mem.totalMB) : -1;
-
-    const disk = monReadDisk();
-    let diskR = -1, diskW = -1;
-    if (monPrevDisk) {
-        const dt = (now - monPrevDisk.ts) / 1000;
-        if (dt > 0) {
-            diskR = Math.max(0, (disk.r - monPrevDisk.r) / 1024 / 1024 / dt);
-            diskW = Math.max(0, (disk.w - monPrevDisk.w) / 1024 / 1024 / dt);
-        }
-    }
-    monPrevDisk = { r: disk.r, w: disk.w, ts: now };
-
-    const net = monReadNet();
-    let netRx = -1, netTx = -1;
-    if (monPrevNet) {
-        const dt = (now - monPrevNet.ts) / 1000;
-        if (dt > 0) {
-            netRx = Math.max(0, (net.rx - monPrevNet.rx) / 1024 / 1024 / dt);
-            netTx = Math.max(0, (net.tx - monPrevNet.tx) / 1024 / 1024 / dt);
-        }
-    }
-    monPrevNet = { rx: net.rx, tx: net.tx, ts: now };
-
-    return { cpuPct, memUsedMB: mem.usedMB, memTotalMB: mem.totalMB, memPct, diskR, diskW, netRx, netTx };
-}
-
-function monCollectDotnet(): Array<{ pid: number; name: string; memMB: number; threads: number }> {
-    const result: Array<{ pid: number; name: string; memMB: number; threads: number }> = [];
-    try {
-        for (const e of fs.readdirSync('/proc', { withFileTypes: true })) {
-            if (!e.isDirectory() || !/^\d+$/.test(e.name)) continue;
-            const pid = parseInt(e.name, 10);
-            try {
-                const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim();
-                if (!cmd.toLowerCase().includes('dotnet')) continue;
-                const dll = cmd.split(' ').find(p => p.endsWith('.dll'));
-                const name = dll ? path.basename(dll, '.dll') : 'dotnet';
-                const status = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
-                const vmRss  = parseInt(status.match(/VmRSS:\s*(\d+)/)?.[1]  ?? '0', 10);
-                const threads = parseInt(status.match(/Threads:\s*(\d+)/)?.[1] ?? '0', 10);
-                result.push({ pid, name, memMB: Math.round(vmRss / 1024), threads });
-            } catch { /* process exited or no perms */ }
-        }
-    } catch { /* /proc not available */ }
-    return result.sort((a, b) => b.memMB - a.memMB);
-}
-
-function monStartPolling(intervalMs: number): void {
-    if (monitorTimer) clearInterval(monitorTimer);
-    monitorTimer = setInterval(() => {
-        if (!monitorPanel) { if (monitorTimer) clearInterval(monitorTimer); return; }
-        monitorPanel.webview.postMessage({ command: 'metrics', os: monCollectOs(), dotnet: monCollectDotnet() });
-    }, intervalMs);
-}
-
-async function monitor(): Promise<void> {
-    if (monitorPanel) { monitorPanel.reveal(vscode.ViewColumn.One); return; }
-
-    const nonce = getNonce();
-    monitorPanel = vscode.window.createWebviewPanel(
-        'openbase.monitor', 'Monitor',
-        vscode.ViewColumn.One,
-        { enableScripts: true, retainContextWhenHidden: true },
-    );
-    monitorPanel.onDidDispose(() => {
-        if (monitorTimer) clearInterval(monitorTimer);
-        monitorTimer = undefined;
-        monPrevCpu = undefined; monPrevDisk = undefined; monPrevNet = undefined;
-        stopMonCounters();
-        monSelectedPid = undefined;
-        monitorPanel = undefined;
-    });
-    monitorPanel.webview.html = buildMonitorHtml(nonce, monitorPanel.webview.cspSource);
-
-    let intervalMs = 2000;
-    monitorPanel.webview.onDidReceiveMessage((msg: { command: string; interval?: number; pid?: number }) => {
-        if (msg.command === 'setInterval' && msg.interval) {
-            intervalMs = msg.interval;
-            if (monitorTimer !== undefined) monStartPolling(intervalMs);
-        } else if (msg.command === 'pause') {
-            if (monitorTimer) clearInterval(monitorTimer);
-            monitorTimer = undefined;
-        } else if (msg.command === 'resume') {
-            monStartPolling(intervalMs);
-        } else if (msg.command === 'selectProcess') {
-            if (msg.pid === monSelectedPid) {
-                stopMonCounters();
-                monSelectedPid = undefined;
-            } else if (msg.pid !== undefined) {
-                monSelectedPid = msg.pid;
-                startMonCounters(msg.pid);
-            }
-        }
-    });
-
-    monCollectOs(); // seed delta state
-    monStartPolling(intervalMs);
-}
-
-function buildMonitorHtml(nonce: string, cspSource: string): string {
-    void cspSource;
-    return /* html */`<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>
-  :root{--bg1:var(--vscode-editor-background,#1e1e1e);--bg2:var(--vscode-sideBar-background,#252526);--border:var(--vscode-panel-border,rgba(128,128,128,.2));--text:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#858585);--purple:#b44fff;--green:#4ec994;--yellow:#e5c07b}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:var(--vscode-font-family,sans-serif);font-size:var(--vscode-font-size,13px);color:var(--text);background:var(--bg1);display:flex;flex-direction:column;height:100vh;overflow:hidden}
-  .toolbar{display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
-  .btn{padding:2px 8px;font-size:11px;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg2);color:var(--text);border-radius:2px}
-  .btn:hover{background:var(--purple);color:#fff;border-color:var(--purple)}
-  select{background:var(--bg1);color:var(--text);border:1px solid var(--border);padding:2px 5px;font-size:11px;font-family:inherit;border-radius:2px;outline:none}
-  .lbl{font-size:11px;color:var(--dim)}
-  .badge-run{display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;background:var(--purple);color:#fff}
-  .badge-pause{display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;border:1px solid var(--border);color:var(--dim)}
-  .content{flex:1;overflow-y:auto;padding:10px}
-  .section{margin-bottom:16px}
-  .section-hdr{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
-  .metric{display:flex;align-items:center;gap:8px;margin-bottom:7px}
-  .m-lbl{font-size:11px;color:var(--dim);width:58px;flex-shrink:0}
-  .bar-track{flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden}
-  .bar-fill{height:100%;border-radius:3px;transition:width .5s ease}
-  .bar-cpu{background:var(--purple)}
-  .bar-mem{background:var(--green)}
-  .m-val{font-size:11px;min-width:90px;text-align:right;color:var(--text)}
-  .io-row{display:flex;gap:6px;margin-top:4px}
-  .io-box{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:3px;padding:5px 8px}
-  .io-title{font-size:10px;color:var(--dim);margin-bottom:3px}
-  .io-vals{display:flex;gap:8px;font-size:11px}
-  .io-up::before{content:'↑ ';color:var(--purple)}
-  .io-dn::before{content:'↓ ';color:var(--green)}
-  .proc-row{display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:3px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;cursor:pointer}
-  .proc-row:hover{border-color:var(--purple)}
-  .proc-row.selected{border-color:var(--purple);background:rgba(180,79,255,.08)}
-  .proc-name{flex:1;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .proc-pid{font-size:10px;color:var(--dim)}
-  .proc-tag{font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(180,79,255,.15);color:var(--purple);white-space:nowrap}
-  .empty{font-size:11px;color:var(--dim);font-style:italic}
-  .gc-section{margin-top:10px;padding:10px;background:var(--bg2);border:1px solid var(--border);border-radius:4px}
-  .gc-hdr{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:8px}
-  .gc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px}
-  .gc-card{background:var(--bg1);border:1px solid var(--border);border-radius:3px;padding:6px 8px}
-  .gc-name{font-size:10px;color:var(--dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .gc-val{font-size:13px;font-weight:600;color:var(--text)}
-  .gc-unavail{font-size:11px;color:var(--dim);font-style:italic}
-  .gc-unavail code{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;color:var(--purple)}
-</style>
-</head>
-<body>
-<div class="toolbar">
-  <button id="tog" class="btn" onclick="toggle()">&#9646;&#9646; Pause</button>
-  <span class="lbl">Every</span>
-  <select id="ivl" onchange="chgInterval()">
-    <option value="1000">1s</option>
-    <option value="2000" selected>2s</option>
-    <option value="5000">5s</option>
-  </select>
-  <span id="badge" class="badge-run">Running</span>
-</div>
-<div class="content">
-  <div class="section">
-    <div class="section-hdr">System</div>
-    <div class="metric">
-      <span class="m-lbl">CPU</span>
-      <div class="bar-track"><div id="cpu-fill" class="bar-fill bar-cpu" style="width:0%"></div></div>
-      <span id="cpu-val" class="m-val">--</span>
-    </div>
-    <div class="metric">
-      <span class="m-lbl">Memory</span>
-      <div class="bar-track"><div id="mem-fill" class="bar-fill bar-mem" style="width:0%"></div></div>
-      <span id="mem-val" class="m-val">--</span>
-    </div>
-    <div class="io-row">
-      <div class="io-box">
-        <div class="io-title">Disk</div>
-        <div class="io-vals"><span class="io-up" id="disk-w">--</span><span class="io-dn" id="disk-r">--</span></div>
-      </div>
-      <div class="io-box">
-        <div class="io-title">Network</div>
-        <div class="io-vals"><span class="io-up" id="net-tx">--</span><span class="io-dn" id="net-rx">--</span></div>
-      </div>
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-hdr">.NET Processes <span style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">(click to monitor GC)</span></div>
-    <div id="dotnet-list"><span class="empty">No .NET processes detected</span></div>
-    <div id="gc-section" style="display:none"></div>
-  </div>
-</div>
-<script nonce="${nonce}">
-  const vscode = acquireVsCodeApi();
-  var paused = false;
-  var selectedPid = null;
-
-  function toggle() {
-    paused = !paused;
-    document.getElementById('tog').innerHTML = paused ? '&#9654; Resume' : '&#9646;&#9646; Pause';
-    var b = document.getElementById('badge');
-    b.className = paused ? 'badge-pause' : 'badge-run';
-    b.textContent = paused ? 'Paused' : 'Running';
-    vscode.postMessage({ command: paused ? 'pause' : 'resume' });
-  }
-
-  function chgInterval() {
-    vscode.postMessage({ command: 'setInterval', interval: parseInt(document.getElementById('ivl').value, 10) });
-  }
-
-  function fmtMbs(v) {
-    if (v < 0) return '--';
-    if (v < 0.1) return (v * 1024).toFixed(0) + ' KB/s';
-    return v.toFixed(1) + ' MB/s';
-  }
-  function fmtMb(v) {
-    if (v < 0) return '--';
-    return v >= 1024 ? (v / 1024).toFixed(1) + ' GB' : v + ' MB';
-  }
-  function esc(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/>/g,'&gt;');
-  }
-  function fmtGcVal(name, v) {
-    var n = name.toLowerCase();
-    if (n.indexOf('memory') !== -1 || n.indexOf('bytes') !== -1) {
-      var mb = v / 1048576;
-      return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
-    }
-    if (n.indexOf('ratio') !== -1 || n.indexOf('percent') !== -1) return v.toFixed(1) + '%';
-    if (n.indexOf('time') !== -1 && v > 1000) return (v / 1000).toFixed(2) + ' s';
-    if (Number.isInteger(v) || v > 100) return v.toFixed(0);
-    return v.toFixed(2);
-  }
-
-  document.getElementById('dotnet-list').addEventListener('click', function(e) {
-    var row = e.target.closest('.proc-row');
-    if (!row) return;
-    var pid = parseInt(row.dataset.pid, 10);
-    vscode.postMessage({ command: 'selectProcess', pid: pid });
-    if (selectedPid === pid) {
-      selectedPid = null;
-      row.classList.remove('selected');
-      document.getElementById('gc-section').style.display = 'none';
-    } else {
-      selectedPid = pid;
-      document.querySelectorAll('.proc-row').forEach(function(r) { r.classList.remove('selected'); });
-      row.classList.add('selected');
-      var gcSec = document.getElementById('gc-section');
-      gcSec.style.display = 'block';
-      gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics</div><span class="gc-unavail">Connecting…</span></div>';
-    }
-  });
-
-  function renderGcMetrics(metrics) {
-    var gcSec = document.getElementById('gc-section');
-    gcSec.style.display = 'block';
-    var keys = Object.keys(metrics).sort();
-    var cards = keys.map(function(k) {
-      return '<div class="gc-card"><div class="gc-name">' + esc(k) + '</div>' +
-        '<div class="gc-val">' + esc(fmtGcVal(k, metrics[k])) + '</div></div>';
-    }).join('');
-    gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics (PID ' + selectedPid + ')</div><div class="gc-grid">' + cards + '</div></div>';
-  }
-
-  window.addEventListener('message', function(e) {
-    var m = e.data;
-    if (m.command === 'dotnetCounters') {
-      if (m.pid === selectedPid) renderGcMetrics(m.metrics);
-      return;
-    }
-    if (m.command === 'dotnetCountersUnavailable') {
-      if (m.pid === selectedPid) {
-        var gcSec = document.getElementById('gc-section');
-        gcSec.style.display = 'block';
-        gcSec.innerHTML = '<div class="gc-section"><div class="gc-hdr">GC / Runtime Metrics</div>' +
-          '<span class="gc-unavail">dotnet-counters not found. Install: <code>' + esc(m.installCmd) + '</code></span></div>';
-      }
-      return;
-    }
-    if (m.command === 'dotnetCountersStopped') {
-      if (m.pid === selectedPid) {
-        var gcSec2 = document.getElementById('gc-section');
-        if (gcSec2.style.display !== 'none') {
-          gcSec2.innerHTML += '<span class="gc-unavail" style="display:block;margin-top:6px">Process exited</span>';
-        }
-        selectedPid = null;
-      }
-      return;
-    }
-    if (m.command !== 'metrics') return;
-    var o = m.os;
-
-    var cpuPct = o.cpuPct;
-    document.getElementById('cpu-fill').style.width = (cpuPct >= 0 ? cpuPct : 0) + '%';
-    document.getElementById('cpu-val').textContent = cpuPct >= 0 ? cpuPct + '%' : '--';
-
-    var memPct = o.memPct;
-    document.getElementById('mem-fill').style.width = (memPct >= 0 ? memPct : 0) + '%';
-    document.getElementById('mem-val').textContent = memPct >= 0 ? fmtMb(o.memUsedMB) + ' / ' + fmtMb(o.memTotalMB) : '--';
-
-    document.getElementById('disk-w').textContent = fmtMbs(o.diskW);
-    document.getElementById('disk-r').textContent = fmtMbs(o.diskR);
-    document.getElementById('net-tx').textContent = fmtMbs(o.netTx);
-    document.getElementById('net-rx').textContent = fmtMbs(o.netRx);
-
-    var procs = m.dotnet;
-    var el = document.getElementById('dotnet-list');
-    if (!procs || !procs.length) {
-      el.innerHTML = '<span class="empty">No .NET processes detected</span>';
-      return;
-    }
-    el.innerHTML = procs.map(function(p) {
-      var sel = p.pid === selectedPid ? ' selected' : '';
-      return '<div class="proc-row' + sel + '" data-pid="' + p.pid + '">' +
-        '<span class="proc-name">' + esc(p.name) + '</span>' +
-        '<span class="proc-pid">PID ' + p.pid + '</span>' +
-        '<span class="proc-tag">' + p.memMB + ' MB</span>' +
-        '<span class="proc-tag">' + p.threads + ' thr</span>' +
-        '</div>';
-    }).join('');
-  });
-</script>
-</body></html>`;
-}
-
-// ─── migration runner ────────────────────────────────────────────────────────
-
-type MigrationEngineType = 'efcore' | 'fluentmigrator';
-
-interface MigrationInfo {
-    id: string;
-    applied: boolean | null; // null = no DB connection, status unknown
-    label?: string;          // display name (FM uses class name, EF uses id)
-    engine?: MigrationEngineType;
-}
-
-type MigrationStatus = 'migration-applied' | 'migration-pending' | 'migration-unknown' | 'migration-message';
-
-let migrationScriptPanel: vscode.WebviewPanel | undefined;
-let migrationRunnerEngine: MigrationEngineType = 'efcore';
-let lastMigrations: MigrationInfo[] = [];
-
-class MigrationItem extends vscode.TreeItem {
-    constructor(
-        public readonly info: MigrationInfo | null,
-        public readonly status: MigrationStatus,
-        label: string,
-    ) {
-        super(label, vscode.TreeItemCollapsibleState.None);
-        this.contextValue = status;
-        if (status === 'migration-applied') {
-            this.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('testing.iconPassed'));
-            this.description = info?.engine === 'fluentmigrator' ? `applied · FM` : 'applied';
-        } else if (status === 'migration-pending') {
-            this.iconPath = new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('list.warningForeground'));
-            this.description = info?.engine === 'fluentmigrator' ? `pending · FM` : 'pending';
-        } else if (status === 'migration-unknown') {
-            this.iconPath = new vscode.ThemeIcon('question');
-            this.description = 'no db connection';
-        } else {
-            this.iconPath = new vscode.ThemeIcon('info');
-        }
-    }
-}
-
-let migrationProvider: MigrationTreeProvider | undefined;
-
-class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    private items: MigrationItem[] = [];
-    private treeView?: vscode.TreeView<MigrationItem>;
-    private loading = false;
-
-    setTreeView(tv: vscode.TreeView<MigrationItem>): void { this.treeView = tv; }
-
-    getTreeItem(e: MigrationItem): vscode.TreeItem { return e; }
-
-    getChildren(): MigrationItem[] { return this.items; }
-
-    async refresh(): Promise<void> {
-        if (this.loading) return;
-        this.loading = true;
-        if (this.treeView) this.treeView.message = 'Loading migrations…';
-        this._onDidChangeTreeData.fire();
-
-        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!cwd) {
-            this.items = [new MigrationItem(null, 'migration-message', 'No workspace folder open')];
-            if (this.treeView) { this.treeView.message = undefined; this.treeView.description = undefined; }
-            this.loading = false;
-            this._onDidChangeTreeData.fire();
-            return;
-        }
-
-        try {
-            const migrations = await listMigrations(cwd);
-            lastMigrations = migrations;
-            if (migrations.length === 0) {
-                this.items = [new MigrationItem(null, 'migration-message', 'No migrations found')];
-                if (this.treeView) this.treeView.description = undefined;
-            } else {
-                migrationRunnerEngine = migrations[0]?.engine ?? 'efcore';
-                this.items = migrations.map(m => {
-                    const status: MigrationStatus = m.applied === null
-                        ? 'migration-unknown'
-                        : m.applied ? 'migration-applied' : 'migration-pending';
-                    return new MigrationItem(m, status, m.label ?? m.id);
-                });
-                const pending = migrations.filter(m => m.applied === false).length;
-                if (this.treeView) {
-                    const engineBadge = migrations[0]?.engine === 'fluentmigrator' ? ' · Fluent Migrator' : '';
-                    this.treeView.description = pending > 0 ? `${pending} pending${engineBadge}` : engineBadge || undefined;
-                }
-            }
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.items = [new MigrationItem(null, 'migration-message', `Error: ${msg}`)];
-            if (this.treeView) this.treeView.description = undefined;
-        }
-
-        if (this.treeView) this.treeView.message = undefined;
-        this.loading = false;
-        this._onDidChangeTreeData.fire();
-    }
-}
-
-function findMigrationsDir(cwd: string): string | undefined {
-    function scan(dir: string, depth: number): string | undefined {
-        if (depth > 6) return undefined;
-        try {
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'bin' || e.name === 'obj') continue;
-                if (e.name === 'Migrations') {
-                    const full = path.join(dir, e.name);
-                    try {
-                        if (fs.readdirSync(full).some(f => /^\d{14}_/.test(f) && f.endsWith('.cs') && !f.endsWith('Designer.cs'))) {
-                            return full;
-                        }
-                    } catch { /* ignore */ }
-                }
-                const found = scan(path.join(dir, e.name), depth + 1);
-                if (found) return found;
-            }
-        } catch { /* ignore */ }
-    }
-    return scan(cwd, 0);
-}
-
-function findMigrationProject(migrationsDir: string): string | undefined {
-    const projectDir = path.dirname(migrationsDir);
-    try {
-        const csproj = fs.readdirSync(projectDir).find(f => f.endsWith('.csproj'));
-        return csproj ? path.join(projectDir, csproj) : undefined;
-    } catch { return undefined; }
-}
-
-function findEfStartupProject(cwd: string): string | undefined {
-    function scan(dir: string, depth: number): string | undefined {
-        if (depth > 5) return undefined;
-        try {
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (e.isFile() && e.name.endsWith('.csproj')) {
-                    try {
-                        const content = fs.readFileSync(path.join(dir, e.name), 'utf-8');
-                        if (content.includes('Microsoft.EntityFrameworkCore.Design')) return path.join(dir, e.name);
-                    } catch { /* ignore */ }
-                }
-                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'bin' && e.name !== 'obj') {
-                    const found = scan(path.join(dir, e.name), depth + 1);
-                    if (found) return found;
-                }
-            }
-        } catch { /* ignore */ }
-    }
-    return scan(cwd, 0);
-}
-
-function listMigrationsFromFs(migrationsDir: string): string[] {
-    try {
-        return fs.readdirSync(migrationsDir)
-            .filter(f => /^\d{14}_/.test(f) && f.endsWith('.cs') && !f.endsWith('Designer.cs') && !f.endsWith('Snapshot.cs'))
-            .sort()
-            .map(f => f.replace(/\.cs$/, ''));
-    } catch { return []; }
-}
-
-async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
-    let cmd = '';
-    try {
-        switch (conn.type) {
-            case 'sqlserver': {
-                fs.writeFileSync(tmpFile, 'SELECT MigrationId FROM [dbo].[__EFMigrationsHistory]', 'utf-8');
-                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                if (conn.user)     parts.push(`-U "${conn.user}"`);
-                if (conn.password) parts.push(`-P "${conn.password}"`);
-                parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
-                cmd = parts.join(' ');
-                break;
-            }
-            case 'pgsql': {
-                fs.writeFileSync(tmpFile, 'SELECT "MigrationId" FROM "__EFMigrationsHistory"', 'utf-8');
-                const port = conn.port ?? '5432';
-                const u = encodeURIComponent(conn.user ?? 'postgres');
-                const p = encodeURIComponent(conn.password ?? '');
-                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
-                break;
-            }
-            case 'oracle': {
-                fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT \"MigrationId\" FROM \"__EFMigrationsHistory\";\n/\nEXIT\n", 'utf-8');
-                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
-                break;
-            }
-            default:
-                return new Set();
-        }
-        const stdout = await new Promise<string>((resolve, reject) => {
-            exec(cmd, { env, timeout: 10000 }, (err, out, stderr) => {
-                if (err && !out) reject(new Error(stderr || err.message));
-                else resolve(out);
-            });
-        });
-        const applied = new Set<string>();
-        for (const line of stdout.split('\n')) {
-            const id = line.trim().replace(/^"|"$/g, '');
-            if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
-        }
-        return applied;
-    } finally {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
-}
-
-async function listMigrations(cwd: string): Promise<MigrationInfo[]> {
-    // Try EF Core first
-    const migrationsDir = findMigrationsDir(cwd);
-    if (migrationsDir) {
-        const ids = listMigrationsFromFs(migrationsDir);
-        if (ids.length === 0) return [];
-        const conn = findConnection(cwd);
-        if (!conn) return ids.map(id => ({ id, applied: null, engine: 'efcore' as MigrationEngineType }));
-        try {
-            const applied = await getAppliedMigrations(conn);
-            return ids.map(id => ({ id, applied: applied.has(id), engine: 'efcore' as MigrationEngineType }));
-        } catch {
-            return ids.map(id => ({ id, applied: null, engine: 'efcore' as MigrationEngineType }));
-        }
-    }
-
-    // Fallback: Fluent Migrator
-    const fmDir = findFluentMigrationsDir(cwd);
-    if (fmDir) {
-        const fmMigs = listFmMigrationsFromFs(fmDir);
-        if (fmMigs.length === 0) return [];
-        const conn = findConnection(cwd);
-        if (!conn) return fmMigs.map(m => ({ id: m.version, label: m.label, applied: null, engine: 'fluentmigrator' as MigrationEngineType }));
-        try {
-            const applied = await getAppliedFmMigrations(conn);
-            return fmMigs.map(m => ({ id: m.version, label: m.label, applied: applied.has(m.version), engine: 'fluentmigrator' as MigrationEngineType }));
-        } catch {
-            return fmMigs.map(m => ({ id: m.version, label: m.label, applied: null, engine: 'fluentmigrator' as MigrationEngineType }));
-        }
-    }
-
-    throw new Error('Nenhuma migration encontrada (EF Core ou Fluent Migrator).');
-}
-
-// ── Fluent Migrator helpers ──────────────────────────────────────────────────
-
-function findFluentMigrationsDir(cwd: string): string | undefined {
-    function scan(dir: string, depth: number): string | undefined {
-        if (depth > 6) return undefined;
-        try {
-            const files = fs.readdirSync(dir, { withFileTypes: true });
-            const hasAttr = files.some(e => {
-                if (!e.isFile() || !e.name.endsWith('.cs')) return false;
-                try { return /\[Migration\s*\(\s*\d+/.test(fs.readFileSync(path.join(dir, e.name), 'utf-8')); }
-                catch { return false; }
-            });
-            if (hasAttr) return dir;
-            for (const e of files) {
-                if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'bin' && e.name !== 'obj') {
-                    const found = scan(path.join(dir, e.name), depth + 1);
-                    if (found) return found;
-                }
-            }
-        } catch { /* ignore */ }
-    }
-    return scan(cwd, 0);
-}
-
-function listFmMigrationsFromFs(dir: string): Array<{ version: string; label: string }> {
-    const result: Array<{ version: string; label: string; n: bigint }> = [];
-    try {
-        for (const file of fs.readdirSync(dir)) {
-            if (!file.endsWith('.cs')) continue;
-            try {
-                const content = fs.readFileSync(path.join(dir, file), 'utf-8');
-                const m = content.match(/\[Migration\s*\(\s*(\d+)/);
-                if (m) result.push({ version: m[1], label: file.replace(/\.cs$/, ''), n: BigInt(m[1]) });
-            } catch { /* ignore */ }
-        }
-    } catch { /* ignore */ }
-    return result.sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0)).map(({ version, label }) => ({ version, label }));
-}
-
-async function getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const tmpFile = path.join(os.tmpdir(), `ob_fmmig_${Date.now()}.sql`);
-    try {
-        let cmd = '';
-        switch (conn.type) {
-            case 'sqlserver': {
-                fs.writeFileSync(tmpFile, 'SELECT CAST(Version AS VARCHAR(50)) FROM VersionInfo', 'utf-8');
-                const p = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                if (conn.user)     p.push(`-U "${conn.user}"`);
-                if (conn.password) p.push(`-P "${conn.password}"`);
-                p.push(`-i "${tmpFile}" -s "|" -W -h -1`);
-                cmd = p.join(' ');
-                break;
-            }
-            case 'pgsql': {
-                fs.writeFileSync(tmpFile, 'SELECT CAST("Version" AS VARCHAR) FROM "VersionInfo"', 'utf-8');
-                const port = conn.port ?? '5432';
-                const u = encodeURIComponent(conn.user ?? 'postgres');
-                const p = encodeURIComponent(conn.password ?? '');
-                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
-                break;
-            }
-            case 'oracle': {
-                fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT CAST(\"Version\" AS VARCHAR(50)) FROM \"VersionInfo\";\n/\nEXIT\n", 'utf-8');
-                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
-                break;
-            }
-            default:
-                return new Set();
-        }
-        const stdout = await new Promise<string>((resolve, reject) => {
-            exec(cmd, { env, timeout: 10000 }, (err, out, stderr) => {
-                if (err && !out) reject(new Error(stderr || err.message));
-                else resolve(out);
-            });
-        });
-        const applied = new Set<string>();
-        for (const line of stdout.split('\n')) {
-            const id = line.trim().replace(/^"|"$/g, '');
-            if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
-        }
-        return applied;
-    } finally {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
-}
-
-function buildFmConnString(conn: DbConnection): string {
-    switch (conn.type) {
-        case 'sqlserver': return `Server=${conn.server};Database=${conn.database};${conn.user ? `User Id=${conn.user};Password=${conn.password ?? ''};` : 'Trusted_Connection=True;'}`;
-        case 'pgsql':     return `Host=${conn.server};Port=${conn.port ?? '5432'};Database=${conn.database};Username=${conn.user ?? 'postgres'};Password=${conn.password ?? ''};`;
-        case 'oracle':    return `Data Source=${conn.server};User Id=${conn.user};Password=${conn.password ?? ''};`;
-    }
-}
-
-function fmProcessorName(conn: DbConnection): string {
-    switch (conn.type) {
-        case 'sqlserver': return 'SqlServer2016';
-        case 'pgsql':     return 'Postgres';
-        case 'oracle':    return 'Oracle';
-    }
-}
-
-function findFmAssembly(fmDir: string): string | undefined {
-    let dir = fmDir;
-    for (let i = 0; i < 4; i++) {
-        try {
-            const csproj = fs.readdirSync(dir).find(f => f.endsWith('.csproj'));
-            if (csproj) {
-                const projName = path.basename(csproj, '.csproj');
-                const binDir = path.join(dir, 'bin');
-                const dll = findDllInDir(binDir, projName + '.dll', 0);
-                if (dll) return dll;
-            }
-        } catch { /* ignore */ }
-        dir = path.dirname(dir);
-    }
-}
-
-function findDllInDir(dir: string, name: string, depth: number): string | undefined {
-    if (depth > 4) return undefined;
-    try {
-        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-            if (e.isFile() && e.name === name) return path.join(dir, e.name);
-            if (e.isDirectory()) {
-                const found = findDllInDir(path.join(dir, e.name), name, depth + 1);
-                if (found) return found;
-            }
-        }
-    } catch { /* ignore */ }
-}
-
-function runFmMigrationCommand(cwd: string, targetVersion?: string, isDown = false): void {
-    const conn = findConnection(cwd);
-    if (!conn) { vscode.window.showErrorMessage('No database connection found.'); return; }
-    const fmDir = findFluentMigrationsDir(cwd);
-    const assembly = fmDir ? findFmAssembly(fmDir) : undefined;
-    if (!assembly) {
-        vscode.window.showErrorMessage('Could not find Fluent Migrator assembly. Build the project first.');
-        return;
-    }
-    const connStr = buildFmConnString(conn);
-    const processor = fmProcessorName(conn);
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const title = isDown ? `FM Rollback to ${targetVersion ?? '0'}` : `FM Migrate Up${targetVersion ? ` to ${targetVersion}` : ''}`;
-    const channel = vscode.window.createOutputChannel(`OpenBase: ${title}`);
-    channel.show(true);
-    const args = ['fm', 'migrate',
-        `--processor "${processor}"`,
-        `--connectionString "${connStr.replace(/"/g, '\\"')}"`,
-        `--assembly "${assembly}"`,
-    ];
-    if (targetVersion) args.push(`--target ${targetVersion}`);
-    if (isDown) args.push('--task rollback');
-    const child = exec(`dotnet ${args.join(' ')}`, { cwd, env, timeout: 120000 });
-    child.stdout?.on('data', (d: string) => channel.append(d));
-    child.stderr?.on('data', (d: string) => channel.append(d));
-    child.on('close', (code) => {
-        if (code === 0) {
-            channel.appendLine('\nCompleted successfully.');
-            vscode.window.showInformationMessage(`${title} completed.`);
-        } else {
-            channel.appendLine(`\nFailed (exit ${code}).`);
-            vscode.window.showErrorMessage(`${title} failed. Check the output panel.`);
-        }
-        migrationProvider?.refresh();
-    });
-    child.on('error', (err) => {
-        channel.appendLine(err.message);
-        vscode.window.showErrorMessage(err.message);
-        migrationProvider?.refresh();
-    });
-}
-
-// ── Dry Run helpers ──────────────────────────────────────────────────────────
-
-function buildMigrationScriptHtml(nonce: string, cspSource: string): string {
-    return /* html */`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%;display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);background:var(--vscode-editor-background);color:var(--vscode-foreground)}
-  :root{
-    --ob-bg0: var(--vscode-editor-background);
-    --ob-bg1: var(--vscode-sideBar-background);
-    --ob-bg2: var(--vscode-input-background);
-    --ob-purple: #b44fff;
-    --ob-pink: #ff3fa4;
-    --ob-border: var(--vscode-panel-border);
-    --ob-text: var(--vscode-foreground);
-    --ob-dim: var(--vscode-descriptionForeground);
-  }
-  body.vscode-dark {
-    --ob-bg0: #0d0f1a;
-    --ob-bg1: #131629;
-    --ob-bg2: #1c1535;
-    --ob-border: rgba(180,79,255,0.22);
-    --ob-text: #ede8f8;
-    --ob-dim: #9080b8;
-  }
-  body.vscode-light {
-    --ob-bg0: #fdfdff;
-    --ob-bg1: #f1f3f9;
-    --ob-bg2: #ffffff;
-    --ob-purple: #7b2cbf;
-    --ob-pink: #d81b60;
-    --ob-border: #e0e4ef;
-    --ob-text: #24292e;
-    --ob-dim: #6a737d;
-  }
-  html,body{background:var(--ob-bg0)!important;color:var(--ob-text)!important}
-  .header{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--ob-border);background:linear-gradient(135deg,rgba(180,79,255,.18),rgba(255,63,164,.10));flex-shrink:0}
-  .header-title{font-weight:600;font-size:13px;background:linear-gradient(90deg,var(--ob-purple),var(--ob-pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-  .header-sub{font-size:11px;color:var(--ob-dim)}
-  .toolbar{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid var(--ob-border);background:var(--ob-bg1);flex-shrink:0}
-  .btn{padding:4px 10px;border:none;cursor:pointer;font-family:inherit;font-size:inherit;border-radius:4px}
-  .btn-secondary{background:rgba(180,79,255,.12);color:var(--ob-purple);border:1px solid var(--ob-border)}
-  .btn-secondary:hover{background:rgba(180,79,255,.24)}
-  .hint{font-size:11px;color:var(--ob-dim);margin-left:auto}
-  .sql-wrap{flex:1;overflow:auto;padding:16px}
-  pre{font-family:var(--vscode-editor-font-family,monospace);font-size:12px;line-height:1.6;white-space:pre;tab-size:2;color:var(--ob-text)}
-  .kw{color:#c084fc;font-weight:600}
-  .cmt{color:#4b3f6b;font-style:italic}
-  .str{color:#f472b6}
-  .num{color:#67e8f9}
-  .loading{padding:20px;color:var(--ob-dim);font-size:12px;font-style:italic}
-  .err-box{padding:12px;background:rgba(255,63,164,.10);border:1px solid rgba(255,63,164,.35);color:#ff90c0;font-size:12px;white-space:pre-wrap;font-family:monospace}
-</style>
-</head>
-<body>
-<div class="header">
-  <span class="header-title">Migration Dry Run</span>
-  <span id="subtitle" class="header-sub"></span>
-</div>
-<div class="toolbar">
-  <button id="copy-btn" class="btn btn-secondary">Copy SQL</button>
-  <button id="save-btn" class="btn btn-secondary">Save as Script&hellip;</button>
-  <span id="line-count" class="hint"></span>
-</div>
-<div class="sql-wrap">
-  <div class="loading" id="loading">Generating script&hellip;</div>
-  <pre id="sql-view" style="display:none"></pre>
-  <div id="err-view" class="err-box" style="display:none"></div>
-</div>
-<script nonce="${nonce}">
-  var vscode = acquireVsCodeApi();
-  var rawSql = '';
-  document.getElementById('copy-btn').onclick = function() { if (rawSql) vscode.postMessage({ command: 'copy', sql: rawSql }); };
-  document.getElementById('save-btn').onclick = function() { if (rawSql) vscode.postMessage({ command: 'save', sql: rawSql }); };
-  window.addEventListener('message', function(e) {
-    var m = e.data;
-    if (m.command === 'load') {
-      rawSql = m.sql || '';
-      document.getElementById('loading').style.display = 'none';
-      if (m.subtitle) document.getElementById('subtitle').textContent = m.subtitle;
-      var pre = document.getElementById('sql-view');
-      pre.innerHTML = highlight(rawSql);
-      pre.style.display = '';
-      document.getElementById('line-count').textContent = rawSql.split('\\n').length + ' lines';
-    } else if (m.command === 'error') {
-      document.getElementById('loading').style.display = 'none';
-      var err = document.getElementById('err-view');
-      err.textContent = m.text;
-      err.style.display = '';
-    }
-  });
-  function highlight(sql) {
-    var s = esc(sql);
-    s = s.replace(/(--[^\\n]*)/g, '\\x01$1\\x02');
-    s = s.replace(/('[^']*')/g, '\\x03$1\\x04');
-    s = s.replace(/\\b(GO|USE|BEGIN|COMMIT|ROLLBACK|EXEC|EXECUTE|CREATE|ALTER|DROP|TABLE|INDEX|VIEW|PROCEDURE|FUNCTION|TRIGGER|CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|KEY|DEFAULT|CHECK|REFERENCES|NOT|NULL|IF|ELSE|END|SET|ON|OFF|WITH|AS|SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|AND|OR|IN|EXISTS|CASE|WHEN|DECLARE|PRINT|ADD|COLUMN|IDENTITY|INT|BIGINT|VARCHAR|NVARCHAR|DATETIME|BIT|FLOAT|DECIMAL|NUMERIC|CHAR|TEXT|DATE|SMALLINT)\\b/gi, '\\x05$1\\x06');
-    s = s.replace(/\\b(\\d+)\\b/g, '\\x07$1\\x08');
-    return s
-      .replace(/\\x01([\\s\\S]*?)\\x02/g, '\\x3cspan class="cmt">$1\\x3c/span>')
-      .replace(/\\x03([\\s\\S]*?)\\x04/g, '\\x3cspan class="str">$1\\x3c/span>')
-      .replace(/\\x05([\\s\\S]*?)\\x06/g, '\\x3cspan class="kw">$1\\x3c/span>')
-      .replace(/\\x07([\\s\\S]*?)\\x08/g, '\\x3cspan class="num">$1\\x3c/span>');
-  }
-  function esc(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/\\x3c/g,'&lt;').replace(/\\x3e/g,'&gt;');
-  }
-</script>
-</body>
-</html>`;
-}
-
-async function showMigrationScript(cwd: string, fromId?: string, toId?: string): Promise<void> {
-    const migrationsDir = findMigrationsDir(cwd);
-    const project = migrationsDir ? findMigrationProject(migrationsDir) : undefined;
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
-    const nonce = getNonce();
-
-    if (migrationScriptPanel) {
-        migrationScriptPanel.reveal(vscode.ViewColumn.Beside);
-    } else {
-        migrationScriptPanel = vscode.window.createWebviewPanel(
-            'openbase.migrationScript', 'Migration Dry Run', vscode.ViewColumn.Beside,
-            { enableScripts: true, retainContextWhenHidden: true },
-        );
-        migrationScriptPanel.onDidDispose(() => { migrationScriptPanel = undefined; });
-        migrationScriptPanel.webview.onDidReceiveMessage(async (msg) => {
-            if (msg.command === 'copy') {
-                await vscode.env.clipboard.writeText(msg.sql);
-                vscode.window.showInformationMessage('SQL copied to clipboard.');
-            }
-            if (msg.command === 'save') {
-                const scriptsDir = getScriptsDir();
-                if (!scriptsDir) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-                const name = await vscode.window.showInputBox({
-                    prompt: 'Save migration script as',
-                    placeHolder: 'migration-script',
-                    validateInput: v => v?.trim() && /^[^\\/:\*\?"<>\|]+$/.test(v.trim()) ? undefined : 'Invalid name',
-                });
-                if (!name?.trim()) return;
-                const safeName = name.trim().replace(/\.sql$/i, '') + '.sql';
-                fs.mkdirSync(scriptsDir, { recursive: true });
-                fs.writeFileSync(path.join(scriptsDir, safeName), msg.sql, 'utf-8');
-                vscode.window.showInformationMessage(`Saved: ${safeName}`);
-                sqlScriptProvider?.refresh();
-            }
-        });
-    }
-
-    migrationScriptPanel.webview.html = buildMigrationScriptHtml(nonce, migrationScriptPanel.webview.cspSource);
-
-    const startupProject = findEfStartupProject(cwd);
-    const args: string[] = ['ef', 'migrations', 'script'];
-    let subtitle = 'all pending (idempotent)';
-    if (fromId !== undefined && toId !== undefined) {
-        args.push(fromId, toId);
-        subtitle = `${fromId || '0'} → ${toId}`;
-    } else {
-        args.push('--idempotent');
-    }
-    if (project) args.push('--project', `"${project}"`);
-    if (startupProject) args.push('--startup-project', `"${startupProject}"`);
-
-    exec(`dotnet ${args.join(' ')}`, { cwd, env, timeout: 60000 }, (err, stdout, stderr) => {
-        if (err && !stdout) {
-            migrationScriptPanel?.webview.postMessage({ command: 'error', text: stderr || err.message });
-        } else {
-            migrationScriptPanel?.webview.postMessage({ command: 'load', sql: stdout, subtitle });
-        }
-    });
-}
-
-function runMigrationCommand(cwd: string, efArgs: string[], title: string): void {
-    const channel = vscode.window.createOutputChannel(`OpenBase: ${title}`);
-    channel.show(true);
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const migrationsDir = findMigrationsDir(cwd);
-    const project = migrationsDir ? findMigrationProject(migrationsDir) : undefined;
-    const startupProject = findEfStartupProject(cwd);
-    const args = [...efArgs];
-    if (project) args.push('--project', `"${project}"`);
-    if (startupProject) args.push('--startup-project', `"${startupProject}"`);
-    const child = exec(`dotnet ${args.join(' ')}`, { cwd, env, timeout: 120000 });
-    child.stdout?.on('data', (d: string) => channel.append(d));
-    child.stderr?.on('data', (d: string) => channel.append(d));
-    child.on('close', (code) => {
-        if (code === 0) {
-            channel.appendLine('\nCompleted successfully.');
-            vscode.window.showInformationMessage(`${title} completed.`);
-        } else {
-            channel.appendLine(`\nFailed (exit ${code}).`);
-            vscode.window.showErrorMessage(`${title} failed. Check the output panel.`);
-        }
-        migrationProvider?.refresh();
-    });
-    child.on('error', (err) => {
-        channel.appendLine(err.message);
-        vscode.window.showErrorMessage(err.message);
-        migrationProvider?.refresh();
-    });
-}
-
-function setupMigrationRunner(context: vscode.ExtensionContext): void {
-    migrationProvider = new MigrationTreeProvider();
-
-    const tv = vscode.window.createTreeView('openbase.migrationrunner.migrations', {
-        treeDataProvider: migrationProvider,
-        showCollapseAll: false,
-    });
-    migrationProvider.setTreeView(tv);
-    context.subscriptions.push(tv);
-
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(() => migrationProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.migrationRunner.refresh',
-            () => migrationProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.migrationRunner.migrateUp', async () => {
-            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-            if (!cwd) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-            const confirmed = await vscode.window.showWarningMessage(
-                'Apply all pending migrations?', { modal: true }, 'Apply');
-            if (confirmed !== 'Apply') return;
-            if (migrationRunnerEngine === 'fluentmigrator') {
-                runFmMigrationCommand(cwd);
-            } else {
-                runMigrationCommand(cwd, ['ef', 'database', 'update'], 'Migrate Up');
-            }
-        }),
-
-        vscode.commands.registerCommand('openbase.migrationRunner.migrateTo',
-            async (item: MigrationItem) => {
-                if (!item.info) return;
-                const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                if (!cwd) return;
-                const isDown = item.status === 'migration-applied';
-                const label = item.info.label ?? item.info.id;
-                const action = isDown
-                    ? await vscode.window.showWarningMessage(
-                        `Revert to "${label}"?`,
-                        { modal: true, detail: 'Down() migrations will run for every version applied after this point. This may cause irreversible data loss.' },
-                        'Revert')
-                    : await vscode.window.showInformationMessage(
-                        `Apply migrations up to "${label}"?`, { modal: true }, 'Apply');
-                if (!action) return;
-                const verb = isDown ? 'Migrate Down to' : 'Migrate Up to';
-                if (migrationRunnerEngine === 'fluentmigrator') {
-                    runFmMigrationCommand(cwd, item.info.id, isDown);
-                } else {
-                    runMigrationCommand(cwd, ['ef', 'database', 'update', item.info.id], `${verb} ${label}`);
-                }
-            }),
-
-        vscode.commands.registerCommand('openbase.migrationRunner.dryRun', async () => {
-            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-            if (!cwd) { vscode.window.showErrorMessage('No workspace folder open.'); return; }
-            if (migrationRunnerEngine === 'fluentmigrator') {
-                vscode.window.showInformationMessage('Dry Run not supported for Fluent Migrator.');
-                return;
-            }
-            await showMigrationScript(cwd);
-        }),
-
-        vscode.commands.registerCommand('openbase.migrationRunner.dryRunTo',
-            async (item: MigrationItem) => {
-                if (!item.info) return;
-                const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                if (!cwd) return;
-                if (migrationRunnerEngine === 'fluentmigrator') {
-                    vscode.window.showInformationMessage('Dry Run not supported for Fluent Migrator.');
-                    return;
-                }
-                const idx = lastMigrations.findIndex(m => m.id === item.info!.id);
-                const prevId = idx > 0 ? lastMigrations[idx - 1].id : '0';
-                const isDown = item.status === 'migration-applied';
-                if (isDown) {
-                    // Show Down script: from this to previous
-                    const nextIdx = lastMigrations.findIndex(m => m.id === item.info!.id);
-                    const nextId = nextIdx < lastMigrations.length - 1 ? lastMigrations[nextIdx + 1].id : item.info.id;
-                    await showMigrationScript(cwd, nextId, item.info.id);
-                } else {
-                    await showMigrationScript(cwd, prevId, item.info.id);
-                }
-            }),
-    );
-}
-
-// ─── dependency inspector ────────────────────────────────────────────────────
-
-interface PackageRef {
-    name: string;
-    version: string;
-    latest?: string;
-}
-
-interface ProjectPackages {
-    project: string;
-    projectPath: string;
-    packages: PackageRef[];
-}
-
-function parseDotnetListJson(stdout: string): ProjectPackages[] {
-    if (!stdout.trim()) return [];
-    try {
-        const json = JSON.parse(stdout) as {
-            projects?: Array<{
-                path: string;
-                frameworks?: Array<{
-                    topLevelPackages?: Array<{
-                        id: string;
-                        resolvedVersion?: string;
-                        requestedVersion?: string;
-                        latestVersion?: string;
-                    }>;
-                }>;
-            }>;
-        };
-        const result: ProjectPackages[] = [];
-        for (const proj of json.projects ?? []) {
-            const pkgMap = new Map<string, PackageRef>();
-            for (const fw of proj.frameworks ?? []) {
-                for (const pkg of fw.topLevelPackages ?? []) {
-                    if (!pkgMap.has(pkg.id)) {
-                        pkgMap.set(pkg.id, {
-                            name: pkg.id,
-                            version: pkg.resolvedVersion ?? pkg.requestedVersion ?? '?',
-                            latest: pkg.latestVersion,
-                        });
-                    } else if (pkg.latestVersion && !pkgMap.get(pkg.id)!.latest) {
-                        pkgMap.get(pkg.id)!.latest = pkg.latestVersion;
-                    }
-                }
-            }
-            if (pkgMap.size > 0) {
-                result.push({
-                    project: path.basename(proj.path, '.csproj'),
-                    projectPath: proj.path,
-                    packages: [...pkgMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
-                });
-            }
-        }
-        return result;
-    } catch {
-        return [];
-    }
-}
-
-let depData: ProjectPackages[] = [];
-let depShowOnlyOutdated = false;
-let depProvider: DepInspectorProvider | undefined;
-
-async function loadDependencies(cwd: string): Promise<ProjectPackages[]> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const run = (args: string) => new Promise<string>(resolve => {
-        exec(`dotnet list package ${args} --format json`, { cwd, env, timeout: 60000 }, (err, stdout) => {
-            resolve(err && !stdout ? '' : stdout);
-        });
-    });
-    const [allOut, outdatedOut] = await Promise.all([run(''), run('--outdated')]);
-    const allPkgs = parseDotnetListJson(allOut);
-    const outdatedPkgs = parseDotnetListJson(outdatedOut);
-    const outdatedMap = new Map<string, string>();
-    for (const proj of outdatedPkgs) {
-        for (const pkg of proj.packages) {
-            if (pkg.latest) outdatedMap.set(`${proj.project}::${pkg.name}`, pkg.latest);
-        }
-    }
-    for (const proj of allPkgs) {
-        for (const pkg of proj.packages) {
-            const latest = outdatedMap.get(`${proj.project}::${pkg.name}`);
-            if (latest) pkg.latest = latest;
-        }
-    }
-    return allPkgs;
-}
-
-class DepPackageItem extends vscode.TreeItem {
-    constructor(
-        public readonly pkg: PackageRef,
-        public readonly projectPath: string,
-    ) {
-        super(pkg.name, vscode.TreeItemCollapsibleState.None);
-        const outdated = !!pkg.latest;
-        this.contextValue = outdated ? 'dep-outdated' : 'dep-uptodate';
-        this.description = outdated ? `${pkg.version}  →  ${pkg.latest}` : pkg.version;
-        this.iconPath = new vscode.ThemeIcon(
-            outdated ? 'arrow-circle-up' : 'pass-filled',
-            new vscode.ThemeColor(outdated ? 'list.warningForeground' : 'testing.iconPassed'),
-        );
-        this.tooltip = outdated
-            ? `Update available: ${pkg.version} → ${pkg.latest}`
-            : `Up to date: ${pkg.version}`;
-    }
-}
-
-class DepProjectItem extends vscode.TreeItem {
-    constructor(public readonly proj: ProjectPackages) {
-        super(proj.project, vscode.TreeItemCollapsibleState.Expanded);
-        const outdatedCount = proj.packages.filter(p => p.latest).length;
-        this.contextValue = outdatedCount > 0 ? 'dep-project-outdated' : 'dep-project';
-        this.description = outdatedCount > 0
-            ? `${outdatedCount} outdated`
-            : `${proj.packages.length} up to date`;
-        this.iconPath = new vscode.ThemeIcon(
-            outdatedCount > 0 ? 'warning' : 'pass',
-            new vscode.ThemeColor(outdatedCount > 0 ? 'list.warningForeground' : 'testing.iconPassed'),
-        );
-        this.tooltip = proj.projectPath;
-    }
-}
-
-class DepInspectorProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<undefined>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-    private loading = false;
-
-    constructor(private readonly cwd: string) {}
-
-    refresh(): void {
-        this.loading = true;
-        this._onDidChangeTreeData.fire(undefined);
-        loadDependencies(this.cwd).then(data => {
-            depData = data;
-            this.loading = false;
-            this._onDidChangeTreeData.fire(undefined);
-        });
-    }
-
-    refreshView(): void { this._onDidChangeTreeData.fire(undefined); }
-
-    getTreeItem(element: vscode.TreeItem): vscode.TreeItem { return element; }
-
-    getChildren(element?: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem[]> {
-        if (!element) {
-            if (this.loading) {
-                const item = new vscode.TreeItem('Loading packages…');
-                item.iconPath = new vscode.ThemeIcon('loading~spin');
-                return [item];
-            }
-            if (!depData.length) {
-                return [new vscode.TreeItem('No packages found — open a .NET workspace')];
-            }
-            return depData
-                .filter(p => !depShowOnlyOutdated || p.packages.some(pkg => pkg.latest))
-                .map(p => new DepProjectItem(p));
-        }
-        if (element instanceof DepProjectItem) {
-            const pkgs = depShowOnlyOutdated
-                ? element.proj.packages.filter(p => p.latest)
-                : element.proj.packages;
-            return pkgs.map(p => new DepPackageItem(p, element.proj.projectPath));
-        }
-        return [];
-    }
-}
-
-function setupDepInspector(context: vscode.ExtensionContext): void {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!cwd) return;
-
-    depProvider = new DepInspectorProvider(cwd);
-
-    context.subscriptions.push(
-        vscode.window.registerTreeDataProvider('openbase.depinspector.packages', depProvider),
-
-        vscode.commands.registerCommand('openbase.dependencyInspector.refresh', () =>
-            depProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.dependencyInspector.toggleFilter', () => {
-            depShowOnlyOutdated = !depShowOnlyOutdated;
-            depProvider?.refreshView();
-        }),
-
-        vscode.commands.registerCommand('openbase.dependencyInspector.update', (item: DepPackageItem) => {
-            if (!(item instanceof DepPackageItem) || !item.pkg.latest) return;
-            const projDir = path.isAbsolute(item.projectPath)
-                ? path.dirname(item.projectPath)
-                : path.dirname(path.join(cwd, item.projectPath));
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-            const out = vscode.window.createOutputChannel('OpenBase Dependencies');
-            out.show(true);
-            out.appendLine(`Updating ${item.pkg.name} → ${item.pkg.latest}…`);
-            exec(`dotnet add package "${item.pkg.name}" --version "${item.pkg.latest}"`,
-                { cwd: projDir, env, timeout: 120000 },
-                (err, stdout, stderr) => {
-                    if (err) out.appendLine(`Error: ${stderr || err.message}`);
-                    else { out.appendLine(stdout.trim()); out.appendLine('Done.'); }
-                    depProvider?.refresh();
-                });
-        }),
-
-        vscode.commands.registerCommand('openbase.dependencyInspector.updateAll', async () => {
-            const outdated = depData.flatMap(proj =>
-                proj.packages.filter(p => p.latest).map(p => ({ pkg: p, projectPath: proj.projectPath }))
-            );
-            if (!outdated.length) {
-                vscode.window.showInformationMessage('All packages are up to date!');
-                return;
-            }
-            const confirm = await vscode.window.showWarningMessage(
-                `Update ${outdated.length} outdated package(s)?`,
-                { modal: true }, 'Update All',
-            );
-            if (confirm !== 'Update All') return;
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-            const out = vscode.window.createOutputChannel('OpenBase Dependencies');
-            out.show(true);
-            for (const { pkg, projectPath } of outdated) {
-                if (!pkg.latest) continue;
-                const projDir = path.isAbsolute(projectPath)
-                    ? path.dirname(projectPath)
-                    : path.dirname(path.join(cwd, projectPath));
-                out.appendLine(`\nUpdating ${pkg.name} → ${pkg.latest}…`);
-                await new Promise<void>(resolve => {
-                    exec(`dotnet add package "${pkg.name}" --version "${pkg.latest}"`,
-                        { cwd: projDir, env, timeout: 120000 },
-                        (err, stdout, stderr) => {
-                            if (err) out.appendLine(`Error: ${stderr || err.message}`);
-                            else out.appendLine(stdout.trim());
-                            resolve();
-                        });
-                });
-            }
-            out.appendLine('\nAll updates complete.');
-            depProvider?.refresh();
-        }),
-    );
-
-    depProvider.refresh();
-}
-
-// ─── endpoints map ───────────────────────────────────────────────────────────
-
-const HTTP_METHODS = ['Get', 'Post', 'Put', 'Delete', 'Patch', 'Head', 'Options'] as const;
-type HttpMethod = typeof HTTP_METHODS[number];
-
-interface EndpointInfo {
-    method: HttpMethod;
-    route: string;
-    action: string;
-    controller: string;
-}
-
-const METHOD_BADGE: Record<HttpMethod, string> = {
-    Get: 'GET', Post: 'POST', Put: 'PUT', Delete: 'DEL',
-    Patch: 'PATCH', Head: 'HEAD', Options: 'OPT',
-};
-
-class EndpointGroupItem extends vscode.TreeItem {
-    constructor(readonly label: string, readonly endpoints: EndpointInfo[]) {
-        super(label, vscode.TreeItemCollapsibleState.Expanded);
-        this.iconPath = new vscode.ThemeIcon('symbol-class');
-        this.contextValue = 'endpointGroup';
-    }
-}
-
-class EndpointItem extends vscode.TreeItem {
-    constructor(readonly endpoint: EndpointInfo) {
-        super(`[${METHOD_BADGE[endpoint.method]}] ${endpoint.route}`, vscode.TreeItemCollapsibleState.None);
-        this.description = endpoint.action;
-        this.tooltip = `${endpoint.method} ${endpoint.route}`;
-        this.contextValue = 'endpoint';
-        this.command = {
-            command: 'openbase.endpointsMap.open',
-            title: 'Open in HTTP Runner',
-            arguments: [this],
-        };
-        const iconMap: Record<HttpMethod, string> = {
-            Get: 'arrow-down', Post: 'arrow-up', Put: 'edit', Delete: 'trash',
-            Patch: 'diff-modified', Head: 'eye', Options: 'settings-gear',
-        };
-        this.iconPath = new vscode.ThemeIcon(iconMap[endpoint.method]);
-    }
-}
-
-function scanEndpoints(cwd: string): EndpointInfo[] {
-    const results: EndpointInfo[] = [];
-
-    const csFiles: string[] = [];
-    function walk(dir: string): void {
-        let entries: fs.Dirent[];
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-            if (e.isDirectory()) {
-                if (['bin', 'obj', 'node_modules', '.git'].includes(e.name)) continue;
-                walk(path.join(dir, e.name));
-            } else if (e.isFile() && e.name.endsWith('.cs')) {
-                csFiles.push(path.join(dir, e.name));
-            }
-        }
-    }
-    walk(cwd);
-
-    for (const file of csFiles) {
-        let src: string;
-        try { src = fs.readFileSync(file, 'utf-8'); } catch { continue; }
-
-        // MVC Controllers
-        const classMatch = src.match(/\bclass\s+(\w+Controller)\b/);
-        if (classMatch) {
-            const controllerName = classMatch[1].replace(/Controller$/, '');
-            const baseRouteMatch = src.match(/\[Route\(\s*["']([^"']+)["']/);
-            const baseRoute = baseRouteMatch
-                ? baseRouteMatch[1].replace('[controller]', controllerName.toLowerCase())
-                : controllerName.toLowerCase();
-
-            for (const m of HTTP_METHODS) {
-                const re = new RegExp(`\\[Http${m}(?:\\(\\s*["']([^"']*)["']\\s*\\))?\\]\\s*(?:\\[[^\\]]*\\]\\s*)*(?:public\\s+[\\w<>\\[\\],\\s]+\\s+(\\w+)\\s*\\()`, 'g');
-                let match: RegExpExecArray | null;
-                while ((match = re.exec(src)) !== null) {
-                    const sub = match[1] ?? '';
-                    const action = match[2] ?? '';
-                    const route = ('/' + [baseRoute, sub].filter(Boolean).join('/')).replace(/\/+/g, '/');
-                    results.push({ method: m, route, action, controller: controllerName });
-                }
-            }
-        }
-
-        // Minimal APIs
-        const minimalRe = /app\.Map(Get|Post|Put|Delete|Patch)\(\s*["']([^"']+)["']/g;
-        let mm: RegExpExecArray | null;
-        while ((mm = minimalRe.exec(src)) !== null) {
-            const method = mm[1] as HttpMethod;
-            const route = mm[2].startsWith('/') ? mm[2] : '/' + mm[2];
-            const fileName = path.basename(file, '.cs');
-            results.push({ method, route, action: '', controller: fileName });
-        }
-    }
-
-    return results;
-}
-
-let endpointsProvider: EndpointsMapProvider | undefined;
-
-class EndpointsMapProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<undefined>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-    private data: EndpointInfo[] = [];
-
-    constructor(private readonly cwd: string) {}
-
-    refresh(): void {
-        this.data = scanEndpoints(this.cwd);
-        this._onDidChangeTreeData.fire(undefined);
-    }
-
-    getTreeItem(e: vscode.TreeItem): vscode.TreeItem { return e; }
-
-    getChildren(element?: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem[]> {
-        if (!element) {
-            if (!this.data.length) {
-                return [new vscode.TreeItem('No endpoints found — open a .NET workspace')];
-            }
-            const groups = new Map<string, EndpointInfo[]>();
-            for (const ep of this.data) {
-                const list = groups.get(ep.controller) ?? [];
-                list.push(ep);
-                groups.set(ep.controller, list);
-            }
-            return [...groups.entries()].map(([name, eps]) => new EndpointGroupItem(name, eps));
-        }
-        if (element instanceof EndpointGroupItem) {
-            return element.endpoints.map(ep => new EndpointItem(ep));
-        }
-        return [];
-    }
-}
-
-function setupEndpointsMap(context: vscode.ExtensionContext): void {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!cwd) return;
-
-    endpointsProvider = new EndpointsMapProvider(cwd);
-
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.cs');
-    context.subscriptions.push(
-        watcher,
-        watcher.onDidChange(() => endpointsProvider?.refresh()),
-        watcher.onDidCreate(() => endpointsProvider?.refresh()),
-        watcher.onDidDelete(() => endpointsProvider?.refresh()),
-    );
-
-    context.subscriptions.push(
-        vscode.window.registerTreeDataProvider('openbase.httprunner.endpoints', endpointsProvider),
-
-        vscode.commands.registerCommand('openbase.endpointsMap.refresh', () =>
-            endpointsProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.endpointsMap.open', async (item: EndpointItem) => {
-            if (!(item instanceof EndpointItem)) return;
-            const { method, route } = item.endpoint;
-            const data: HttpRequestData = { method: method.toUpperCase(), url: '{{LOCAL_URL}}' + route };
-            if (httpPanel) {
-                httpPanel.reveal(vscode.ViewColumn.One);
-                httpPanel.webview.postMessage({ command: 'loadRequest', ...data });
-            } else {
-                httpPendingRequest = data;
-                await httpRunner();
-            }
-        }),
-    );
-
-    endpointsProvider.refresh();
-}
-
-// ─── solution explorer ───────────────────────────────────────────────────────
-
-type SolutionNodeKind = 'solution' | 'solutionFolder' | 'project' | 'folder' | 'file';
-
-const SE_SOLUTION_FOLDER_TYPE = '2150E333-8FDC-42A3-9474-1A3956D46DE8';
-
-const SE_IGNORED_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs', '.idea']);
-
-const SE_FILE_ICONS: Record<string, string> = {
-    '.cs':   'symbol-class',
-    '.csx':  'symbol-class',
-    '.json': 'bracket',
-    '.xml':  'code',
-    '.http': 'globe',
-    '.rest': 'globe',
-    '.sql':  'database',
-    '.md':   'book',
-    '.ts':   'symbol-variable',
-    '.js':   'symbol-variable',
-    '.yaml': 'list-tree',
-    '.yml':  'list-tree',
-    '.env':  'lock',
-    '.txt':  'file-text',
-    '.sh':   'terminal',
-    '.ps1':  'terminal',
-};
-
-class SolutionNode extends vscode.TreeItem {
-    public slnChildren: SolutionNode[] = [];
-
-    constructor(
-        public readonly fsPath: string,
-        public readonly kind: SolutionNodeKind,
-        label?: string,
-    ) {
-        super(
-            label ?? path.basename(fsPath),
-            kind === 'solution' ? vscode.TreeItemCollapsibleState.Expanded
-                : kind === 'file' ? vscode.TreeItemCollapsibleState.None
-                : vscode.TreeItemCollapsibleState.Collapsed,
-        );
-        this.contextValue = kind;
-
-        switch (kind) {
-            case 'solution':
-                this.iconPath = new vscode.ThemeIcon('layers');
-                this.tooltip = fsPath;
-                this.resourceUri = vscode.Uri.file(fsPath);
-                break;
-            case 'solutionFolder':
-                this.iconPath = vscode.ThemeIcon.Folder;
-                this.tooltip = label;
-                break;
-            case 'project':
-                this.iconPath = new vscode.ThemeIcon('symbol-namespace');
-                this.description = '.csproj';
-                this.tooltip = fsPath;
-                this.resourceUri = vscode.Uri.file(fsPath);
-                break;
-            case 'folder':
-                this.iconPath = vscode.ThemeIcon.Folder;
-                this.tooltip = fsPath;
-                this.resourceUri = vscode.Uri.file(fsPath);
-                break;
-            case 'file':
-                this.iconPath = new vscode.ThemeIcon(
-                    SE_FILE_ICONS[path.extname(fsPath).toLowerCase()] ?? 'file',
-                );
-                this.tooltip = fsPath;
-                this.resourceUri = vscode.Uri.file(fsPath);
-                this.command = {
-                    command: 'vscode.open',
-                    title: 'Open File',
-                    arguments: [vscode.Uri.file(fsPath)],
-                };
-                break;
-        }
-    }
-}
-
-function buildSlnChildren(slnPath: string): SolutionNode[] {
-    let content: string;
-    try { content = fs.readFileSync(slnPath, 'utf-8'); } catch { return []; }
-    const slnDir = path.dirname(slnPath);
-
-    // Parse all Project(...) = "name", "path", "{guid}" entries
-    const nodeMap = new Map<string, SolutionNode>();
-    const order: string[] = [];
-    const re = /^Project\("\{([^}]+)\}"\)\s*=\s*"([^"]+)",\s*"([^"]+)",\s*"\{([^}]+)\}"/gm;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-        const typeGuid = m[1].toUpperCase();
-        const name = m[2];
-        const entryPath = m[3];
-        const guid = m[4].toUpperCase();
-        let node: SolutionNode;
-        if (typeGuid === SE_SOLUTION_FOLDER_TYPE) {
-            node = new SolutionNode('', 'solutionFolder', name);
-        } else {
-            const csprojPath = path.resolve(slnDir, entryPath.replace(/\\/g, path.sep));
-            if (!fs.existsSync(csprojPath)) continue;
-            node = new SolutionNode(csprojPath, 'project', name);
-        }
-        nodeMap.set(guid, node);
-        order.push(guid);
-    }
-
-    // Parse GlobalSection(NestedProjects): child GUID = parent GUID
-    const nested = new Map<string, string>();
-    const nestedMatch = content.match(/GlobalSection\(NestedProjects\)\s*=\s*preSolution([\s\S]*?)EndGlobalSection/);
-    if (nestedMatch) {
-        const nestedRe = /\{([^}]+)\}\s*=\s*\{([^}]+)\}/g;
-        let nm: RegExpExecArray | null;
-        while ((nm = nestedRe.exec(nestedMatch[1])) !== null) {
-            nested.set(nm[1].toUpperCase(), nm[2].toUpperCase());
-        }
-    }
-
-    // Attach children to solution folder nodes; collect top-level nodes
-    const topLevel: SolutionNode[] = [];
-    for (const guid of order) {
-        const node = nodeMap.get(guid);
-        if (!node) continue;
-        const parentGuid = nested.get(guid);
-        const parent = parentGuid ? nodeMap.get(parentGuid) : undefined;
-        if (parent) {
-            parent.slnChildren.push(node);
-        } else {
-            topLevel.push(node);
-        }
-    }
-    return topLevel;
-}
-
-function seWalkDir(dir: string): SolutionNode[] {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
-    const folders = entries
-        .filter(e => e.isDirectory() && !SE_IGNORED_DIRS.has(e.name))
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map(e => new SolutionNode(path.join(dir, e.name), 'folder'));
-    const files = entries
-        .filter(e => e.isFile())
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map(e => new SolutionNode(path.join(dir, e.name), 'file'));
-    return [...folders, ...files];
-}
-
-let solutionExplorerProvider: SolutionExplorerProvider | undefined;
-
-class SolutionExplorerDecorationProvider implements vscode.FileDecorationProvider {
-    private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<undefined>();
-    readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
-
-    notifyChanged(): void { this._onDidChangeFileDecorations.fire(undefined); }
-
-    provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
-        if (!uri.fsPath.endsWith('.csproj')) return undefined;
-
-        const projDir = path.dirname(uri.fsPath) + path.sep;
-        let errorCount = 0;
-        for (const [fileUri, diags] of vscode.languages.getDiagnostics()) {
-            if (!fileUri.fsPath.startsWith(projDir)) continue;
-            errorCount += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
-        }
-
-        if (errorCount === 0) return undefined;
-
-        return {
-            badge: errorCount >= 100 ? '!!' : String(errorCount),
-            tooltip: `${errorCount} erro${errorCount !== 1 ? 's' : ''} de build`,
-            color: new vscode.ThemeColor('list.errorForeground'),
-        };
-    }
-}
-
-class SolutionExplorerProvider implements vscode.TreeDataProvider<SolutionNode> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<SolutionNode | undefined | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    constructor(private readonly cwd: string) {}
-
-    refresh(): void { this._onDidChangeTreeData.fire(); }
-
-    getTreeItem(e: SolutionNode): vscode.TreeItem { return e; }
-
-    getChildren(element?: SolutionNode): vscode.ProviderResult<SolutionNode[]> {
-        if (!element) return this._roots();
-        if (element.kind === 'solution') return this._projectsFromSln(element.fsPath);
-        if (element.kind === 'solutionFolder') return element.slnChildren;
-        if (element.kind === 'project') return seWalkDir(path.dirname(element.fsPath));
-        if (element.kind === 'folder') return seWalkDir(element.fsPath);
-        return [];
-    }
-
-    private _roots(): SolutionNode[] {
-        let slnFiles: string[] = [];
-        try {
-            slnFiles = fs.readdirSync(this.cwd)
-                .filter(f => f.endsWith('.sln'))
-                .sort()
-                .map(f => path.join(this.cwd, f));
-        } catch {}
-
-        if (slnFiles.length > 0) {
-            return slnFiles.map(s => new SolutionNode(s, 'solution', path.basename(s, '.sln')));
-        }
-
-        return this._findCsprojs(this.cwd);
-    }
-
-    private _projectsFromSln(slnPath: string): SolutionNode[] {
-        return buildSlnChildren(slnPath);
-    }
-
-    private _findCsprojs(dir: string): SolutionNode[] {
-        let entries: fs.Dirent[];
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
-        const results: SolutionNode[] = [];
-        for (const e of entries) {
-            if (e.isFile() && e.name.endsWith('.csproj')) {
-                results.push(new SolutionNode(path.join(dir, e.name), 'project', path.basename(e.name, '.csproj')));
-            } else if (e.isDirectory() && !SE_IGNORED_DIRS.has(e.name)) {
-                try {
-                    const sub = fs.readdirSync(path.join(dir, e.name)).filter(f => f.endsWith('.csproj'));
-                    for (const f of sub) {
-                        results.push(new SolutionNode(path.join(dir, e.name, f), 'project', path.basename(f, '.csproj')));
-                    }
-                } catch {}
-            }
-        }
-        return results;
-    }
-}
-
-
-function writePubxml(profilesDir: string, name: string, content: string): void {
-    fs.mkdirSync(profilesDir, { recursive: true });
-    fs.writeFileSync(path.join(profilesDir, `${name}.pubxml`), content, 'utf-8');
-}
-
-async function sePublishProject(cwd: string): Promise<void> {
-    const proj = findEntryProject(cwd);
-    if (!proj) { vscode.window.showErrorMessage('Nenhum projeto encontrado para publicar.'); return; }
-
-    const projDir   = path.dirname(proj.csprojPath);
-    const profilesDir = path.join(projDir, 'Properties', 'PublishProfiles');
-
-    let existing: string[] = [];
-    try { existing = fs.readdirSync(profilesDir).filter(f => f.endsWith('.pubxml')).map(f => path.basename(f, '.pubxml')); } catch {}
-
-    const items: vscode.QuickPickItem[] = [
-        ...existing.map(p => ({ label: p, description: 'perfil salvo', iconPath: new vscode.ThemeIcon('file-code') })),
-        ...(existing.length ? [{ label: '', kind: vscode.QuickPickItemKind.Separator }] : []),
-        { label: '$(folder)  Pasta local',       description: 'Publicar em uma pasta local' },
-        { label: '$(globe)   FTP',                description: 'Publicar via FTP' },
-        { label: '$(server)  Web Deploy (IIS)',   description: 'Publicar via Web Deploy no IIS' },
-    ];
-
-    const picked = await vscode.window.showQuickPick(items, { title: 'OpenBase: Publicar — Destino' });
-    if (!picked || picked.kind === vscode.QuickPickItemKind.Separator) return;
-
-    if (existing.includes(picked.label)) {
-        openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${picked.label}"`);
-        return;
-    }
-
-    if (picked.label.includes('Pasta local'))    { await sePublishLocal(proj, projDir, profilesDir); return; }
-    if (picked.label.includes('FTP'))            { await sePublishFtp(proj, projDir, profilesDir);   return; }
-    if (picked.label.includes('Web Deploy'))     { await sePublishWebDeploy(proj, projDir, profilesDir); }
-}
-
-async function sePublishLocal(
-    proj: NonNullable<ReturnType<typeof findEntryProject>>,
-    projDir: string,
-    profilesDir: string,
-): Promise<void> {
-    const name = await vscode.window.showInputBox({ title: 'Publicar Local (1/2) — Nome do perfil', value: 'FolderPublish' });
-    if (!name) return;
-
-    const outPath = await vscode.window.showInputBox({
-        title: 'Publicar Local (2/2) — Pasta de saída',
-        value: path.join(projDir, 'bin', 'publish'),
-    });
-    if (outPath === undefined) return;
-
-    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
-<Project>
-  <PropertyGroup>
-    <DeleteExistingFiles>true</DeleteExistingFiles>
-    <LaunchSiteAfterPublish>True</LaunchSiteAfterPublish>
-    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
-    <PublishProvider>FileSystem</PublishProvider>
-    <PublishUrl>${outPath}</PublishUrl>
-    <WebPublishMethod>FileSystem</WebPublishMethod>
-    <TargetFramework>${proj.targetFramework}</TargetFramework>
-    <SelfContained>false</SelfContained>
-  </PropertyGroup>
-</Project>`);
-
-    openTerminal('Publish', projDir, `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}"`);
-}
-
-async function sePublishFtp(
-    proj: NonNullable<ReturnType<typeof findEntryProject>>,
-    projDir: string,
-    profilesDir: string,
-): Promise<void> {
-    const name = await vscode.window.showInputBox({ title: 'Publicar FTP (1/5) — Nome do perfil', value: 'FtpPublish' });
-    if (!name) return;
-    const host = await vscode.window.showInputBox({ title: 'Publicar FTP (2/5) — Servidor', placeHolder: 'ftp.exemplo.com' });
-    if (!host) return;
-    const remotePath = await vscode.window.showInputBox({ title: 'Publicar FTP (3/5) — Caminho remoto', value: '/' });
-    if (remotePath === undefined) return;
-    const user = await vscode.window.showInputBox({ title: 'Publicar FTP (4/5) — Usuário' });
-    if (user === undefined) return;
-    const password = await vscode.window.showInputBox({ title: 'Publicar FTP (5/5) — Senha', password: true });
-    if (password === undefined) return;
-
-    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
-<Project>
-  <PropertyGroup>
-    <WebPublishMethod>FTP</WebPublishMethod>
-    <PublishProtocol>FTP</PublishProtocol>
-    <PublishUrl>ftp://${host}${remotePath.startsWith('/') ? remotePath : '/' + remotePath}</PublishUrl>
-    <UserName>${user}</UserName>
-    <FTPPassiveMode>True</FTPPassiveMode>
-    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
-    <TargetFramework>${proj.targetFramework}</TargetFramework>
-    <SelfContained>false</SelfContained>
-  </PropertyGroup>
-</Project>`);
-
-    openTerminal('Publish FTP', projDir,
-        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
-}
-
-async function sePublishWebDeploy(
-    proj: NonNullable<ReturnType<typeof findEntryProject>>,
-    projDir: string,
-    profilesDir: string,
-): Promise<void> {
-    const name = await vscode.window.showInputBox({ title: 'Web Deploy (1/5) — Nome do perfil', value: 'WebDeployPublish' });
-    if (!name) return;
-    const serverUrl = await vscode.window.showInputBox({ title: 'Web Deploy (2/5) — URL do servidor', placeHolder: 'https://meuservidor.com:8172' });
-    if (!serverUrl) return;
-    const sitePath = await vscode.window.showInputBox({ title: 'Web Deploy (3/5) — Caminho IIS', placeHolder: 'Default Web Site/meuapp', value: 'Default Web Site' });
-    if (sitePath === undefined) return;
-    const user = await vscode.window.showInputBox({ title: 'Web Deploy (4/5) — Usuário' });
-    if (user === undefined) return;
-    const password = await vscode.window.showInputBox({ title: 'Web Deploy (5/5) — Senha', password: true });
-    if (password === undefined) return;
-
-    writePubxml(profilesDir, name, `<?xml version="1.0" encoding="utf-8"?>
-<Project>
-  <PropertyGroup>
-    <WebPublishMethod>MSDeploy</WebPublishMethod>
-    <PublishProtocol>MSDeploy</PublishProtocol>
-    <MSDeployServiceURL>${serverUrl}</MSDeployServiceURL>
-    <DeployIisAppPath>${sitePath}</DeployIisAppPath>
-    <SkipExtraFilesOnServer>True</SkipExtraFilesOnServer>
-    <MSDeployPublishMethod>RemoteAgent</MSDeployPublishMethod>
-    <EnableMSDeployBackup>True</EnableMSDeployBackup>
-    <UserName>${user}</UserName>
-    <LastUsedBuildConfiguration>Release</LastUsedBuildConfiguration>
-    <TargetFramework>${proj.targetFramework}</TargetFramework>
-    <SelfContained>false</SelfContained>
-  </PropertyGroup>
-</Project>`);
-
-    openTerminal('Publish Web Deploy', projDir,
-        `dotnet publish "${proj.csprojPath}" -c Release /p:PublishProfile="${name}" /p:Password="${password.replace(/"/g, '\\"')}"`);
-}
-
-function setupSolutionExplorer(context: vscode.ExtensionContext): void {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!cwd) return;
-
-    solutionExplorerProvider = new SolutionExplorerProvider(cwd);
-
-    const treeView = vscode.window.createTreeView('openbase.solutionexplorer.tree', {
-        treeDataProvider: solutionExplorerProvider,
-        showCollapseAll: true,
-    });
-
-    const watcher = vscode.workspace.createFileSystemWatcher('**/{*.sln,*.csproj}');
-    watcher.onDidCreate(() => solutionExplorerProvider?.refresh());
-    watcher.onDidDelete(() => solutionExplorerProvider?.refresh());
-    watcher.onDidChange(() => solutionExplorerProvider?.refresh());
-
-    const decorationProvider = new SolutionExplorerDecorationProvider();
-
-    context.subscriptions.push(
-        treeView,
-        watcher,
-        vscode.window.registerFileDecorationProvider(decorationProvider),
-        vscode.languages.onDidChangeDiagnostics(() => decorationProvider.notifyChanged()),
-
-        vscode.workspace.onDidChangeWorkspaceFolders(() => solutionExplorerProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.refresh',
-            () => solutionExplorerProvider?.refresh()),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.buildAll', () => {
-            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
-            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
-            openTerminal('Build Solution', cwd, `dotnet build ${target}`);
-        }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.runAll', () => {
-            const proj = findEntryProject(cwd);
-            const target = proj ? `"${proj.csprojPath}"` : '.';
-            openTerminal('Run Solution', cwd, `dotnet run --project ${target}`);
-        }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.debug', async () => {
-            const folder = vscode.workspace.workspaceFolders?.[0];
-            if (!folder) return;
-
-            const serverReadyAction = {
-                action: 'openExternally',
-                pattern: '\\bNow listening on:\\s+(https?://\\S+)',
-            };
-
-            const launchConfigs: vscode.DebugConfiguration[] | undefined =
-                vscode.workspace.getConfiguration('launch', folder.uri).get('configurations');
-
-            if (launchConfigs && launchConfigs.length > 0) {
-                const config = { ...launchConfigs[0] };
-                if (!config.serverReadyAction) config.serverReadyAction = serverReadyAction;
-                await vscode.debug.startDebugging(folder, config);
-            } else {
-                const proj = findEntryProject(cwd);
-                if (!proj) {
-                    vscode.window.showErrorMessage('Nenhum projeto encontrado para depurar.');
-                    return;
-                }
-                const projDir = path.dirname(proj.csprojPath);
-                const config: vscode.DebugConfiguration = {
-                    name: proj.assemblyName,
-                    type: 'coreclr',
-                    request: 'launch',
-                    program: path.join(projDir, 'bin', 'Debug', proj.targetFramework, `${proj.assemblyName}.dll`),
-                    args: [],
-                    cwd: projDir,
-                    stopAtEntry: false,
-                    env: { ASPNETCORE_ENVIRONMENT: 'Development' },
-                    serverReadyAction,
-                };
-                await vscode.debug.startDebugging(folder, config);
-            }
-        }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.test', () => {
-            const slnFiles = fs.readdirSync(cwd).filter(f => f.endsWith('.sln'));
-            const target = slnFiles.length > 0 ? `"${path.join(cwd, slnFiles[0])}"` : '.';
-            openTerminal('Run Tests', cwd, `dotnet test ${target}`);
-        }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.publish',
-            () => sePublishProject(cwd)),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.build',
-            (item: SolutionNode) => {
-                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
-                openTerminal('Build', path.dirname(item.fsPath), `dotnet build "${item.fsPath}"`);
-            }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.run',
-            (item: SolutionNode) => {
-                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
-                openTerminal('Run', path.dirname(item.fsPath), `dotnet run --project "${item.fsPath}"`);
-            }),
-
-        vscode.commands.registerCommand('openbase.solutionExplorer.openTerminal',
-            (item: SolutionNode) => {
-                if (!(item instanceof SolutionNode) || item.kind !== 'project') return;
-                const projDir = path.dirname(item.fsPath);
-                const projName = path.basename(item.fsPath, '.csproj');
-                const terminal = vscode.window.createTerminal({
-                    name: `OpenBase: ${projName}`,
-                    cwd: projDir,
-                    env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
-                });
-                terminal.show();
-            }),
-    );
-}
-
-// ─── task runner ─────────────────────────────────────────────────────────────
-
-class TaskItem extends vscode.TreeItem {
-    constructor(
-        public readonly number: number,
-        public readonly title: string,
-        public readonly labels: string[],
-        public readonly milestone: string | null,
-        public readonly assignees: string[]
-    ) {
-        super(`[#${number}] ${title}`, vscode.TreeItemCollapsibleState.None);
-        this.tooltip = `Issue #${number}: ${title}\nLabels: ${labels.join(', ')}\nMilestone: ${milestone ?? 'None'}\nAssignees: ${assignees.join(', ')}`;
-        this.contextValue = 'task';
-        this.iconPath = new vscode.ThemeIcon('issues');
-    }
-}
-
-class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<TaskItem | undefined | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    constructor(private readonly cwd: string) {}
-
-    refresh(): void {
-        this._onDidChangeTreeData.fire();
-    }
-
-    getTreeItem(element: TaskItem): vscode.TreeItem {
-        return element;
-    }
-
-    async getChildren(element?: TaskItem): Promise<TaskItem[]> {
-        if (element) return [];
-
-        const tasks: TaskItem[] = [];
-
-        // GitHub Issues (Existing)
-        try {
-            const stdout = await new Promise<string>((resolve, reject) => {
-                const extraPath = dotnetToolsPath();
-                const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-                exec('gh issue list --json number,title,labels,assignees,milestone', { cwd: this.cwd, env }, (err, out) => {
-                    if (err) reject(err);
-                    else resolve(out);
-                });
-            });
-            const issues = JSON.parse(stdout);
-            tasks.push(...issues.map((i: any) => new TaskItem(i.number, i.title, i.labels.map((l: any) => l.name), i.milestone?.title || null, i.assignees.map((a: any) => a.login))));
-        } catch (e) {
-            console.error('Error fetching GitHub issues:', e);
-        }
-
-        // Azure DevOps (Stub)
-        tasks.push(new TaskItem(0, "Azure DevOps Integration (Stub)", ["Azure"], null, []));
-
-        // Jira (Stub)
-        tasks.push(new TaskItem(0, "Jira Integration (Stub)", ["Jira"], null, []));
-
-        return tasks;
-    }
-}
-
-let taskProvider: TaskProvider | undefined;
-
-function setupTaskRunner(context: vscode.ExtensionContext): void {
-    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!rootPath) return;
-
-    taskProvider = new TaskProvider(rootPath);
-    vscode.window.registerTreeDataProvider('openbase.taskrunner.tree', taskProvider);
-
-    const reg = (id: string, fn: (...args: any[]) => any) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
-
-    reg('openbase.taskRunner.refresh', () => taskProvider?.refresh());
-
-    reg('openbase.taskRunner.openInBrowser', (item: TaskItem) => {
-        if (!item) return;
-        const extraPath = dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        exec(`gh issue view ${item.number} --web`, { cwd: rootPath, env });
-    });
-
-    reg('openbase.taskRunner.develop', (item: TaskItem) => {
-        if (!item) return;
-        const terminal = vscode.window.createTerminal({
-            name: `OpenBase: Issue #${item.number}`,
-            cwd: rootPath,
-            env: { PATH: `${dotnetToolsPath()}${path.delimiter}${process.env.PATH ?? ''}` },
-        });
-        terminal.show();
-        terminal.sendText(`gh issue develop ${item.number}`);
-    });
-
-    reg('openbase.taskRunner.toSpecialist', (item: TaskItem) => {
-        if (!item) return;
-        
-        let entity = '';
-        let method = '';
-        
-        const m1 = item.title.match(/Add\s+(\w+)\s+to\s+(\w+)/i);
-        if (m1) {
-            method = m1[1];
-            entity = m1[2];
-        } else {
-            const words = item.title.split(' ');
-            if (words.length >= 2) {
-                method = words[0];
-                entity = words[words.length - 1];
-            }
-        }
-
-        vscode.commands.executeCommand('openbase.specialist');
-        
-        setTimeout(() => {
-            panelProvider?.postMessage({
-                command: 'fillSpecialist',
-                entity,
-                method
-            });
-        }, 1000);
-    });
-}
-
-// ─── status bar ──────────────────────────────────────────────────────────────
-
-function setupStatusBar(context: vscode.ExtensionContext): void {
-    const connItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    connItem.command = 'openbase.sqlRunner';
-    
-    const activeItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
-    activeItem.text = '$(rocket) OpenBase';
-    activeItem.tooltip = 'OpenBase CLI';
-    activeItem.show();
-
-    const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 102);
-    statusItem.text = '$(sync~spin) OpenBase: Idle';
-    statusItem.show();
-
-    context.subscriptions.push(connItem, activeItem, statusItem);
-
-    function refresh(): void {
-        const folder = vscode.workspace.workspaceFolders?.[0];
-        if (!folder) { 
-            connItem.hide(); 
-            activeItem.text = '$(rocket) OpenBase (No project)';
-            statusItem.text = '$(error) OpenBase: Inactive';
-            return; 
-        }
-
-        activeItem.text = `$(rocket) OpenBase: ${path.basename(folder.uri.fsPath)}`;
-        statusItem.text = '$(check) OpenBase: Ready';
-
-        const conn = findConnection(folder.uri.fsPath);
-        if (!conn) { 
-            connItem.text = '$(database) No Connection';
-            connItem.tooltip = 'No database connection configured';
-        } else {
-            connItem.text = `$(database) ${conn.label}`;
-            connItem.tooltip = `Connected to: ${conn.server}/${conn.database}`;
-        }
-        connItem.show();
-    }
-
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(refresh),
-        vscode.window.onDidChangeActiveTextEditor(refresh),
-    );
-
-    refresh();
-}
-
-// ─── activate ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ activate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function activate(context: vscode.ExtensionContext): void {
     extContext = context;
@@ -5590,35 +2884,76 @@ export function activate(context: vscode.ExtensionContext): void {
         findConnection,
         dotnetToolsPath,
         getScriptsDir,
-        onScriptSaved: () => sqlScriptProvider?.refresh(),
+      onScriptSaved: () => { void vscode.commands.executeCommand('openbase.sqlRunner.scripts.refresh'); },
         onSendToSpecialist: async (sql: string) => {
             await vscode.commands.executeCommand('openbase.panel.focus');
             panelProvider?.postNavigateTo('sp', sql);
         },
         sqlRunnerService,
     });
-    setupStatusBar(context);
-    setupSqlTableBrowser(context);
-    setupSqlScriptLibrary(context);
-    setupHttpRequestLibrary(context);
-    setupMigrationRunner(context);
-    setupDepInspector(context);
-    setupEndpointsMap(context);
-    setupSolutionExplorer(context);
-    setupTaskRunner(context);
+    setupStatusBar(context, { findConnection });
+    setupSqlTableBrowser(context, {
+        findConnection,
+        loadSqlTables,
+        buildSelectQuery,
+      openScriptInSqlRunner: async (filePath: string, directContent?: string) => {
+        const content = directContent ?? fs.readFileSync(filePath, 'utf-8');
+        const name = directContent ? '' : path.basename(filePath);
+        await sqlRunnerProvider?.openScript(content, name);
+      },
+        openTableInspector,
+        openErDiagram,
+        dotnetToolsPath,
+    });
+    setupSqlScriptLibrary(context, {
+      openScript: async (content: string, name: string) => {
+        await sqlRunnerProvider?.openScript(content, name);
+      },
+    });
+    setupHttpRequestLibrary(context, {
+        getHttpPanel: () => httpPanel,
+        openHttpRunner: httpRunner,
+        setPendingRequest: (data) => { httpPendingRequest = data; },
+        promptScriptName,
+        importSwaggerToHttpRunner,
+    });
+    setupMigrationRunner(context, {
+        dotnetToolsPath,
+        findConnection,
+        getNonce,
+        getScriptsDir,
+      refreshSqlScripts: () => { void vscode.commands.executeCommand('openbase.sqlRunner.scripts.refresh'); },
+    });
+    setupDepInspector(context, { dotnetToolsPath });
+    setupMonitor(context, { dotnetToolsPath, getNonce });
+    setupLogViewer(context, { dotnetToolsPath, getNonce });
+    setupEndpointsMap(context, {
+        getHttpPanel: () => httpPanel,
+        setPendingRequest: (data) => { httpPendingRequest = data; },
+        openHttpRunner: httpRunner,
+    });
+    setupSolutionExplorer(context, {
+        findEntryProject,
+        openTerminal,
+        dotnetToolsPath,
+    });
+    setupTaskRunner(context, {
+        dotnetToolsPath,
+        postToPanel: (msg) => panelProvider?.postMessage(msg),
+    });
 
     // Helper to execute commands
     const execute = async (command: string, message: string, stream: any) => {
         stream.markdown(message + '\n\n*Running command...*');
         try {
             await vscode.commands.executeCommand(command);
-            stream.markdown(`\n\n✅ Command \`${command}\` executed successfully.`);
+            stream.markdown(`\n\nâœ… Command \`${command}\` executed successfully.`);
         } catch (error) {
-            stream.markdown(`\n\n❌ Error executing \`${command}\`: ${error}`);
+            stream.markdown(`\n\nâŒ Error executing \`${command}\`: ${error}`);
         }
     };
 
-    // Handler para implementação de issue
+    // Handler para implementaÃ§Ã£o de issue
     async function handleIssueImplementation(type: string, id: string, stream: any) {
         stream.markdown(`Analisando issue \`#${type}/${id}\`...`);
 
@@ -5631,7 +2966,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 command = 'openbase.scaffold';
                 break;
             case 'fix':
-                message = `Fix #${id} detectado. Preparando atualização de scaffold...`;
+                message = `Fix #${id} detectado. Preparando atualizaÃ§Ã£o de scaffold...`;
                 command = 'openbase.scaffoldUpdate';
                 break;
             case 'api':
@@ -5639,16 +2974,16 @@ export function activate(context: vscode.ExtensionContext): void {
                 command = 'openbase.specialist';
                 break;
             default:
-                stream.markdown(`Tipo de issue \`${type}\` não mapeado para um fluxo automático.`);
+                stream.markdown(`Tipo de issue \`${type}\` nÃ£o mapeado para um fluxo automÃ¡tico.`);
                 return;
         }
 
         stream.markdown(`\n\n${message}`);
         try {
             await vscode.commands.executeCommand(command);
-            stream.markdown(`\n\n✅ Fluxo para \`#${type}/${id}\` iniciado com sucesso.`);
+            stream.markdown(`\n\nâœ… Fluxo para \`#${type}/${id}\` iniciado com sucesso.`);
         } catch (error) {
-            stream.markdown(`\n\n❌ Erro ao iniciar fluxo para \`#${type}/${id}\`: ${error}`);
+            stream.markdown(`\n\nâŒ Erro ao iniciar fluxo para \`#${type}/${id}\`: ${error}`);
         }
     }
 
@@ -5660,13 +2995,11 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider('openbase.sqlrunner.sidebar', new RunnerSidebarProvider('SQL Runner', 'Open SQL Runner', () => sqlRunnerProvider?.open())),
         vscode.window.registerWebviewViewProvider('openbase.httprunner.sidebar', new RunnerSidebarProvider('HTTP Runner', 'Open HTTP Runner', httpRunner)),
         vscode.window.registerWebviewViewProvider('openbase.erdiagram.sidebar', new RunnerSidebarProvider('ER Diagram', 'Open ER Diagram', openErDiagram)),
-        vscode.window.registerWebviewViewProvider('openbase.logviewer.sidebar', new RunnerSidebarProvider('Log Viewer', 'Open Log Viewer', logViewer)),
-        vscode.window.registerWebviewViewProvider('openbase.migrationrunner.sidebar', new RunnerSidebarProvider('Migration Runner', 'Refresh Migrations', () => migrationProvider?.refresh())),
-        vscode.window.registerWebviewViewProvider('openbase.monitor.sidebar', new RunnerSidebarProvider('Monitor', 'Open Monitor', () => { monitor(); })),
-        vscode.window.registerWebviewViewProvider('openbase.depinspector.sidebar', new RunnerSidebarProvider('Dependency Inspector', 'Refresh Packages', () => depProvider?.refresh())),
-        vscode.commands.registerCommand('openbase.monitor', () => monitor()),
-        vscode.commands.registerCommand('openbase.logViewer', () => logViewer()),
-        vscode.commands.registerCommand('openbase.migrationRunner', () => migrationProvider?.refresh()),
+        vscode.window.registerWebviewViewProvider('openbase.logviewer.sidebar', new RunnerSidebarProvider('Log Viewer', 'Open Log Viewer', () => { void vscode.commands.executeCommand('openbase.logViewer'); })),
+        vscode.window.registerWebviewViewProvider('openbase.migrationrunner.sidebar', new RunnerSidebarProvider('Migration Runner', 'Refresh Migrations', () => { void vscode.commands.executeCommand('openbase.migrationRunner.refresh'); })),
+        vscode.window.registerWebviewViewProvider('openbase.monitor.sidebar', new RunnerSidebarProvider('Monitor', 'Open Monitor', () => { void vscode.commands.executeCommand('openbase.monitor'); })),
+        vscode.window.registerWebviewViewProvider('openbase.depinspector.sidebar', new RunnerSidebarProvider('Dependency Inspector', 'Refresh Packages', () => { void vscode.commands.executeCommand('openbase.dependencyInspector.refresh'); })),
+        vscode.commands.registerCommand('openbase.migrationRunner', () => vscode.commands.executeCommand('openbase.migrationRunner.refresh')),
         vscode.commands.registerCommand('openbase.teamsMeeting', () => vscode.window.showInformationMessage('MS Teams integration opening...')),
         vscode.commands.registerCommand('openbase.zoomMeeting', () => vscode.window.showInformationMessage('Zoom integration opening...')),
         vscode.commands.registerCommand('openbase.slackMeeting', () => vscode.window.showInformationMessage('Slack integration opening...')),
@@ -5698,3 +3031,8 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {}
+
+
+
+
+
