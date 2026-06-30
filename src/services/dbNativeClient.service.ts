@@ -35,14 +35,14 @@ function toCell(value: unknown): string {
 }
 
 export class DbNativeClientService {
-    async executeQuery(conn: DbConnection, sql: string): Promise<SqlQueryResult | undefined> {
+    async executeQuery(conn: DbConnection, sql: string): Promise<SqlQueryResult> {
         if (conn.type === 'pgsql') return this.executePg(conn, sql);
         if (conn.type === 'sqlserver') return this.executeSqlServer(conn, sql);
         if (conn.type === 'oracle') return this.executeOracle(conn, sql);
-        return undefined;
+        throw new Error(`Unsupported database type: ${conn.type}`);
     }
 
-    async explainQuery(conn: DbConnection, sql: string): Promise<string | undefined> {
+    async explainQuery(conn: DbConnection, sql: string): Promise<string> {
         if (conn.type === 'pgsql') {
             const client = new PgClient({
                 host: conn.server,
@@ -64,7 +64,6 @@ export class DbNativeClientService {
         }
 
         if (conn.type === 'sqlserver') {
-            if (!conn.user || !conn.password) return undefined;
             // pool max:1 keeps SET SHOWPLAN_TEXT ON and the query on the same session.
             const pool = await this.connectSqlServer(conn, { max: 1 });
             try {
@@ -95,7 +94,7 @@ export class DbNativeClientService {
             }
         }
 
-        return undefined;
+        throw new Error(`Unsupported database type: ${conn.type}`);
     }
 
     async fetchSchemas(conn: DbConnection): Promise<string[] | undefined> {
@@ -121,7 +120,6 @@ export class DbNativeClientService {
         }
 
         if (conn.type === 'sqlserver') {
-            if (!conn.user || !conn.password) return undefined;
             const pool = await this.connectSqlServer(conn);
             try {
                 const result = await pool.request().query("SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name");
@@ -178,7 +176,6 @@ export class DbNativeClientService {
         }
 
         if (conn.type === 'sqlserver') {
-            if (!conn.user || !conn.password) return undefined;
             const pool = await this.connectSqlServer(conn);
             try {
                 const schemaFilter = targetSchema
@@ -281,7 +278,6 @@ export class DbNativeClientService {
         }
 
         if (conn.type === 'sqlserver') {
-            if (!conn.user || !conn.password) return undefined;
             const pool = await this.connectSqlServer(conn);
             try {
                 const s = schema.replace(/'/g, "''");
@@ -422,11 +418,7 @@ export class DbNativeClientService {
         }
     }
 
-    private async executeSqlServer(conn: DbConnection, sql: string): Promise<SqlQueryResult | undefined> {
-        if (!conn.user || !conn.password) {
-            return undefined;
-        }
-
+    private async executeSqlServer(conn: DbConnection, sql: string): Promise<SqlQueryResult> {
         const pool = await this.connectSqlServer(conn);
         try {
             const result = await pool.request().query(sql);
@@ -477,16 +469,21 @@ export class DbNativeClientService {
     }
 
     private async connectSqlServer(conn: DbConnection, poolOpts?: { max?: number }): Promise<mssql.ConnectionPool> {
+        const useWindowsAuth = !conn.user || !conn.password;
         const config: mssql.config = {
             server: conn.server,
             database: conn.database,
-            user: conn.user,
-            password: conn.password,
             options: {
                 encrypt: false,
                 trustServerCertificate: true,
+                trustedConnection: useWindowsAuth,
             },
         };
+
+        if (!useWindowsAuth) {
+            config.user = conn.user;
+            config.password = conn.password;
+        }
 
         if (conn.port) {
             config.port = Number(conn.port);

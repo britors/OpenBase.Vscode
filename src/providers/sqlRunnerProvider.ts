@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { exec } from 'child_process';
 import { DbConnection } from '../models/dbConnection';
 import { SqlRunnerService } from '../services/sqlRunner.service';
 import { DbNativeClientService } from '../services/dbNativeClient.service';
@@ -22,7 +21,6 @@ interface HistoryEntry {
 export interface SqlRunnerProviderDeps {
     context: vscode.ExtensionContext;
     findConnection: (cwd: string) => DbConnection | undefined;
-    dotnetToolsPath: () => string;
     getScriptsDir: () => string | undefined;
     onScriptSaved: () => void;
     onSendToSpecialist: (sql: string) => Promise<void>;
@@ -31,7 +29,6 @@ export interface SqlRunnerProviderDeps {
 
 export class SqlRunnerProvider {
     private panel: vscode.WebviewPanel | undefined;
-    private process: import('child_process').ChildProcess | undefined;
     private log: vscode.OutputChannel | undefined;
     private pendingScript: { content: string; name: string } | undefined;
     private readonly dbNative = new DbNativeClientService();
@@ -154,8 +151,6 @@ export class SqlRunnerProvider {
         }
 
         if (msg.command === 'cancel') {
-            this.process?.kill();
-            this.process = undefined;
             this.panel?.webview.postMessage({ command: 'cancelled' });
             return;
         }
@@ -214,75 +209,12 @@ export class SqlRunnerProvider {
         this.panel?.webview.postMessage({ command: 'explainRunning' });
 
         try {
-            const nativeOutput = await this.dbNative.explainQuery(activeConn, sql);
-            if (nativeOutput !== undefined) {
-                const tree = this.deps.sqlRunnerService.parseExplainPlan(nativeOutput, activeConn.type);
-                this.panel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
-                return;
-            }
-            if (activeConn.type === 'pgsql') {
-                this.panel?.webview.postMessage({ command: 'explainError', text: 'PostgreSQL explain is available only through the native driver.' });
-                return;
-            }
-            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
-                this.panel?.webview.postMessage({ command: 'explainError', text: 'SQL Server explain with explicit credentials is available only through the native driver.' });
-                return;
-            }
-            if (activeConn.type === 'oracle') {
-                this.panel?.webview.postMessage({ command: 'explainError', text: 'Oracle explain is available only through the native driver.' });
-                return;
-            }
-        } catch (e: unknown) {
-            const text = e instanceof Error ? e.message : String(e);
-            if (activeConn.type === 'pgsql') {
-                this.panel?.webview.postMessage({ command: 'explainError', text: `PostgreSQL explain failed via native driver: ${text}` });
-                return;
-            }
-            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
-                this.panel?.webview.postMessage({ command: 'explainError', text: `SQL Server explain failed via native driver: ${text}` });
-                return;
-            }
-            if (activeConn.type === 'oracle') {
-                this.panel?.webview.postMessage({ command: 'explainError', text: `Oracle explain failed via native driver: ${text}` });
-                return;
-            }
-            this.out().appendLine(`[SQL Runner] Native explain fallback due to error: ${text}`);
-        }
-
-        const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
-        try {
-            let explainSql = '';
-            let cmd = '';
-            switch (activeConn.type) {
-                case 'sqlserver': {
-                    explainSql = `SET SHOWPLAN_TEXT ON\nGO\n${sql}\nGO\nSET SHOWPLAN_TEXT OFF\nGO\n`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    const p = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
-                    if (activeConn.user) p.push(`-U "${activeConn.user}"`);
-                    if (activeConn.password) p.push(`-P "${activeConn.password}"`);
-                    p.push(`-i "${tmpFile}"`);
-                    cmd = p.join(' ');
-                    break;
-                }
-            }
-
-            const output = await new Promise<string>((resolve, reject) => {
-                exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
-                    if (err && !stdout) reject(new Error(stderr || err.message));
-                    else resolve(stdout + (stderr ? `\n${stderr}` : ''));
-                });
-            });
-
+            const output = await this.dbNative.explainQuery(activeConn, sql);
             const tree = this.deps.sqlRunnerService.parseExplainPlan(output, activeConn.type);
             this.panel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
             this.panel?.webview.postMessage({ command: 'explainError', text });
-        } finally {
-            try { fs.unlinkSync(tmpFile); } catch { }
         }
     }
 
@@ -303,83 +235,7 @@ export class SqlRunnerProvider {
         this.out().appendLine('[SQL Runner] Sent "running" to webview.');
 
         try {
-            const nativeResult = await this.dbNative.executeQuery(activeConn, sql);
-            if (nativeResult !== undefined) {
-                this.out().appendLine(`[SQL Runner] Native driver result: ${nativeResult.columns.length} cols, ${nativeResult.rows.length} rows.`);
-                this.panel?.webview.postMessage({ command: 'result', ...nativeResult });
-
-                const prevEntries = this.deps.context.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
-                const newEntry: HistoryEntry = {
-                    sql,
-                    timestamp: Date.now(),
-                    connectionLabel: activeConn.label,
-                    rowCount: nativeResult.rows.length,
-                };
-                const updatedEntries = [newEntry, ...prevEntries].slice(0, SQL_HISTORY_LIMIT);
-                await this.deps.context.globalState.update(SQL_HISTORY_KEY, updatedEntries);
-                this.panel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
-                return;
-            }
-            if (activeConn.type === 'pgsql') {
-                this.panel?.webview.postMessage({ command: 'error', text: 'PostgreSQL execution is available only through the native driver.' });
-                return;
-            }
-            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
-                this.panel?.webview.postMessage({ command: 'error', text: 'SQL Server execution with explicit credentials is available only through the native driver.' });
-                return;
-            }
-            if (activeConn.type === 'oracle') {
-                this.panel?.webview.postMessage({ command: 'error', text: 'Oracle execution is available only through the native driver.' });
-                return;
-            }
-        } catch (e: unknown) {
-            const text = e instanceof Error ? e.message : String(e);
-            if (activeConn.type === 'pgsql') {
-                this.panel?.webview.postMessage({ command: 'error', text: `PostgreSQL execution failed via native driver: ${text}` });
-                return;
-            }
-            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
-                this.panel?.webview.postMessage({ command: 'error', text: `SQL Server execution failed via native driver: ${text}` });
-                return;
-            }
-            if (activeConn.type === 'oracle') {
-                this.panel?.webview.postMessage({ command: 'error', text: `Oracle execution failed via native driver: ${text}` });
-                return;
-            }
-            this.out().appendLine(`[SQL Runner] Native execution fallback due to error: ${text}`);
-        }
-
-        const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        let cmd = '';
-
-        try {
-            switch (activeConn.type) {
-                case 'sqlserver': {
-                    fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
-                    if (activeConn.user) parts.push(`-U "${activeConn.user}"`);
-                    if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
-                    parts.push(`-i "${tmpFile}" -s "|" -W`);
-                    cmd = parts.join(' ');
-                    break;
-                }
-            }
-
-            this.out().appendLine(`[SQL Runner] Executing: ${cmd.replace(/(-P\s*")[^"]*"/, '-P "***"')}`);
-
-            const output = await new Promise<string>((resolve, reject) => {
-                const child = exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
-                    this.process = undefined;
-                    this.out().appendLine(`[SQL Runner] exec done. err=${err?.message ?? 'none'} stdout=${stdout.length}b stderr=${stderr.length}b`);
-                    if (err && !stdout) reject(new Error(stderr || err.message));
-                    else resolve(stdout + (stderr ? `\n${stderr}` : ''));
-                });
-                this.process = child;
-            });
-
-            const result = this.deps.sqlRunnerService.parseSqlOutput(output, activeConn.type);
+            const result = await this.dbNative.executeQuery(activeConn, sql);
             this.out().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
             this.panel?.webview.postMessage({ command: 'result', ...result });
 
@@ -397,8 +253,6 @@ export class SqlRunnerProvider {
             const text = e instanceof Error ? e.message : String(e);
             this.out().appendLine(`[SQL Runner] Error: ${text}`);
             this.panel?.webview.postMessage({ command: 'error', text });
-        } finally {
-            try { fs.unlinkSync(tmpFile); } catch { }
         }
     }
 }

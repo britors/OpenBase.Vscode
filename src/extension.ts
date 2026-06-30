@@ -599,7 +599,6 @@ export function activate(context: vscode.ExtensionContext): void {
     sqlRunnerProvider = new SqlRunnerProvider({
         context,
         findConnection,
-        dotnetToolsPath,
         getScriptsDir,
       onScriptSaved: () => { void vscode.commands.executeCommand('openbase.sqlRunner.scripts.refresh'); },
         onSendToSpecialist: async (sql: string) => {
