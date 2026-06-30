@@ -193,6 +193,7 @@ export function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string
   var activeTabId = null;
   var tabCounter = 0;
   var lastRunSql = '';
+  var completionItems = []; // {schema, name, kind}
 
   document.getElementById('run-btn').addEventListener('click', run);
   document.getElementById('cancel-btn').addEventListener('click', function() {
@@ -378,6 +379,61 @@ export function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string
     editor.onDidChangeModelContent(function() {
       vscode.postMessage({ command: 'autoSave', sql: editor.getValue() });
     });
+
+    monaco.languages.registerCompletionItemProvider('sql', {
+      triggerCharacters: ['.'],
+      provideCompletionItems: function(model, position) {
+        if (!completionItems.length) return { suggestions: [] };
+
+        var wordInfo = model.getWordUntilPosition(position);
+
+        // Text on the current line from column 1 up to just before the current word
+        var linePrefix = model.getValueInRange({
+          startLineNumber: position.lineNumber, startColumn: 1,
+          endLineNumber: position.lineNumber, endColumn: wordInfo.startColumn
+        });
+
+        // Detect "schema." or "[schema]." or '"schema".' prefix
+        var schemaMatch = linePrefix.match(/(?:^|[\s,(=+])(?:"([^"]+)"|\[([^\]]+)\]|(\w+))\.$/)
+                       || linePrefix.match(/^(?:"([^"]+)"|\[([^\]]+)\]|(\w+))\.$/);
+        var filterSchema = schemaMatch
+          ? (schemaMatch[1] || schemaMatch[2] || schemaMatch[3] || null)
+          : null;
+
+        var filtered = filterSchema
+          ? completionItems.filter(function(i) {
+              return i.schema.toLowerCase() === filterSchema.toLowerCase();
+            })
+          : completionItems;
+
+        var range = {
+          startLineNumber: position.lineNumber,
+          startColumn: wordInfo.startColumn,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column
+        };
+
+        return {
+          suggestions: filtered.map(function(item) {
+            var kind = item.kind === 'table'
+              ? monaco.languages.CompletionItemKind.Struct
+              : item.kind === 'function'
+              ? monaco.languages.CompletionItemKind.Function
+              : monaco.languages.CompletionItemKind.Method;
+            return {
+              label: item.name,
+              kind: kind,
+              insertText: item.name,
+              detail: item.schema,
+              documentation: { value: '**' + item.kind + '** · ' + item.schema + '.' + item.name },
+              sortText: (item.kind === 'table' ? '0' : '1') + item.name.toLowerCase(),
+              range: range,
+            };
+          })
+        };
+      }
+    });
+
     document.getElementById('editor-loading').style.display = 'none';
     if (pendingLoad !== null) {
       editor.setValue(pendingLoad);
@@ -434,6 +490,7 @@ export function buildSqlRunnerHtml(conn: DbConnection | undefined, nonce: string
   window.addEventListener('message', function(e) {
     var m = e.data;
     if (m.command === 'triggerRun') { run(); return; }
+    if (m.command === 'loadCompletions') { completionItems = m.items || []; return; }
     if (m.command === 'loadHistory') {
       historyEntries = m.entries || [];
       renderHistory();

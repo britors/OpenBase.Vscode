@@ -7,6 +7,8 @@ import { SqlRunnerService } from '../services/sqlRunner.service';
 import { DbNativeClientService } from '../services/dbNativeClient.service';
 import { buildSqlRunnerHtml } from './sqlRunnerHtml';
 
+type CompletionItem = { schema: string; name: string; kind: 'table' | 'function' | 'procedure' };
+
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
 const SQL_AUTOSAVE_KEY = 'sqlRunnerAutoSave';
@@ -32,6 +34,7 @@ export class SqlRunnerProvider {
     private log: vscode.OutputChannel | undefined;
     private pendingScript: { content: string; name: string } | undefined;
     private readonly dbNative = new DbNativeClientService();
+    private completionCache: CompletionItem[] = [];
 
     constructor(private readonly deps: SqlRunnerProviderDeps) {}
 
@@ -118,6 +121,13 @@ export class SqlRunnerProvider {
             }
             const historyEntries = this.deps.context.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
             this.panel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
+            void this.preloadCompletions();
+            return;
+        }
+
+        if (msg.command === 'refreshCompletions') {
+            this.completionCache = [];
+            void this.preloadCompletions();
             return;
         }
 
@@ -192,6 +202,26 @@ export class SqlRunnerProvider {
         }
 
         await this.handleRun(msg.sql.trim());
+    }
+
+    private async preloadCompletions(): Promise<void> {
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const conn = cwd ? this.deps.findConnection(cwd) : undefined;
+        if (!conn) return;
+        try {
+            const objects = await this.dbNative.loadSqlObjects(conn);
+            if (!objects) return;
+            const items: CompletionItem[] = [];
+            for (const [schema, obj] of objects) {
+                for (const name of obj.tables)     items.push({ schema, name, kind: 'table' });
+                for (const name of obj.functions)  items.push({ schema, name, kind: 'function' });
+                for (const name of obj.procedures) items.push({ schema, name, kind: 'procedure' });
+            }
+            this.completionCache = items;
+            this.panel?.webview.postMessage({ command: 'loadCompletions', items });
+        } catch {
+            // ignore — completions are best-effort
+        }
     }
 
     private async handleExplain(sqlRaw?: string): Promise<void> {
