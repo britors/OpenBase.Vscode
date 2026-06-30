@@ -303,21 +303,18 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
             }
         }
 
-        if (conn.type === 'sqlserver' && conn.user && conn.password) {
+        if (conn.type === 'sqlserver') {
             try {
                 const nativeSql = 'SELECT [MigrationId] FROM [dbo].[__EFMigrationsHistory]';
                 const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
-                if (nativeResult) {
-                    const applied = new Set<string>();
-                    for (const row of nativeResult.rows) {
-                        const id = Array.isArray(row)
-                            ? String(row[0] ?? '').trim()
-                            : String((row as Record<string, unknown>).MigrationId ?? '').trim();
-                        if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
-                    }
-                    return applied;
+                const applied = new Set<string>();
+                for (const row of nativeResult.rows) {
+                    const id = Array.isArray(row)
+                        ? String(row[0] ?? '').trim()
+                        : String((row as Record<string, unknown>).MigrationId ?? '').trim();
+                    if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
                 }
-                throw new Error('Native SQL Server query returned no result.');
+                return applied;
             } catch {
                 throw new Error('Failed to load applied EF migrations from SQL Server via native driver.');
             }
@@ -343,43 +340,7 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
             }
         }
 
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
-        let cmd = '';
-        try {
-            switch (conn.type) {
-                case 'sqlserver': {
-                    fs.writeFileSync(tmpFile, 'SELECT MigrationId FROM [dbo].[__EFMigrationsHistory]', 'utf-8');
-                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                    if (conn.user) parts.push(`-U "${conn.user}"`);
-                    if (conn.password) parts.push(`-P "${conn.password}"`);
-                    parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
-                    cmd = parts.join(' ');
-                    break;
-                }
-                default:
-                    return new Set();
-            }
-            const stdout = await new Promise<string>((resolve, reject) => {
-                exec(cmd, { env, timeout: 10000 }, (err, out, stderr) => {
-                    if (err && !out) reject(new Error(stderr || err.message));
-                    else resolve(out);
-                });
-            });
-            const applied = new Set<string>();
-            for (const line of stdout.split('\n')) {
-                const id = line.trim().replace(/^"|"$/g, '');
-                if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
-            }
-            return applied;
-        } finally {
-            try {
-                fs.unlinkSync(tmpFile);
-            } catch {
-                // ignore
-            }
-        }
+        return new Set();
     }
 
     private async listMigrations(cwd: string): Promise<MigrationInfo[]> {
@@ -500,21 +461,18 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
             }
         }
 
-        if (conn.type === 'sqlserver' && conn.user && conn.password) {
+        if (conn.type === 'sqlserver') {
             try {
                 const nativeSql = 'SELECT CAST([Version] AS VARCHAR(50)) AS [Version] FROM [VersionInfo]';
                 const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
-                if (nativeResult) {
-                    const applied = new Set<string>();
-                    for (const row of nativeResult.rows) {
-                        const id = Array.isArray(row)
-                            ? String(row[0] ?? '').trim()
-                            : String((row as Record<string, unknown>).Version ?? '').trim();
-                        if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
-                    }
-                    return applied;
+                const applied = new Set<string>();
+                for (const row of nativeResult.rows) {
+                    const id = Array.isArray(row)
+                        ? String(row[0] ?? '').trim()
+                        : String((row as Record<string, unknown>).Version ?? '').trim();
+                    if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
                 }
-                throw new Error('Native SQL Server query returned no result.');
+                return applied;
             } catch {
                 throw new Error('Failed to load applied Fluent migrations from SQL Server via native driver.');
             }
@@ -524,59 +482,20 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
             try {
                 const nativeSql = 'SELECT CAST("Version" AS VARCHAR2(50)) AS "Version" FROM "VersionInfo"';
                 const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
-                if (nativeResult) {
-                    const applied = new Set<string>();
-                    for (const row of nativeResult.rows) {
-                        const id = Array.isArray(row)
-                            ? String(row[0] ?? '').trim()
-                            : String((row as Record<string, unknown>).Version ?? '').trim();
-                        if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
-                    }
-                    return applied;
+                const applied = new Set<string>();
+                for (const row of nativeResult.rows) {
+                    const id = Array.isArray(row)
+                        ? String(row[0] ?? '').trim()
+                        : String((row as Record<string, unknown>).Version ?? '').trim();
+                    if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
                 }
-                throw new Error('Native Oracle query returned no result.');
+                return applied;
             } catch {
                 throw new Error('Failed to load applied Fluent migrations from Oracle via native driver.');
             }
         }
 
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        const tmpFile = path.join(os.tmpdir(), `ob_fmmig_${Date.now()}.sql`);
-        try {
-            let cmd = '';
-            switch (conn.type) {
-                case 'sqlserver': {
-                    fs.writeFileSync(tmpFile, 'SELECT CAST(Version AS VARCHAR(50)) FROM VersionInfo', 'utf-8');
-                    const p = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                    if (conn.user) p.push(`-U "${conn.user}"`);
-                    if (conn.password) p.push(`-P "${conn.password}"`);
-                    p.push(`-i "${tmpFile}" -s "|" -W -h -1`);
-                    cmd = p.join(' ');
-                    break;
-                }
-                default:
-                    return new Set();
-            }
-            const stdout = await new Promise<string>((resolve, reject) => {
-                exec(cmd, { env, timeout: 10000 }, (err, out, stderr) => {
-                    if (err && !out) reject(new Error(stderr || err.message));
-                    else resolve(out);
-                });
-            });
-            const applied = new Set<string>();
-            for (const line of stdout.split('\n')) {
-                const id = line.trim().replace(/^"|"$/g, '');
-                if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
-            }
-            return applied;
-        } finally {
-            try {
-                fs.unlinkSync(tmpFile);
-            } catch {
-                // ignore
-            }
-        }
+        return new Set();
     }
 
     private buildFmConnString(conn: DbConnection): string {

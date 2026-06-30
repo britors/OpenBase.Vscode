@@ -1,7 +1,3 @@
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { exec } from 'child_process';
 import * as vscode from 'vscode';
 import { DbConnection } from '../models/dbConnection';
 import { DbTemplate } from '../models/dbTemplate';
@@ -153,7 +149,6 @@ export interface SqlTableBrowserProviderDeps {
     openScriptInSqlRunner: (name: string, content: string) => Promise<void>;
     openTableInspector: (conn: DbConnection, schema: string, table: string, dbType: DbTemplate) => Promise<void>;
     openErDiagram: () => Promise<void>;
-    dotnetToolsPath: () => string;
 }
 
 export function setupSqlTableBrowser(context: vscode.ExtensionContext, deps: SqlTableBrowserProviderDeps): void {
@@ -177,58 +172,14 @@ export function setupSqlTableBrowser(context: vscode.ExtensionContext, deps: Sql
                 return;
             }
 
-            let schemas: string[] = [];
-            const tmpFile = path.join(os.tmpdir(), `ob_schemas_${Date.now()}.sql`);
-            const extraPath = deps.dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-
             try {
-                let nativeSchemas: string[] | undefined;
-                let nativeError: unknown;
-                try {
-                    nativeSchemas = await dbNativeClientService.fetchSchemas(conn);
-                } catch (e) {
-                    nativeError = e;
-                }
-                const nativeMsg = nativeError instanceof Error ? ` ${nativeError.message}` : '';
-                if (nativeSchemas && nativeSchemas.length) {
-                    schemas = nativeSchemas;
-                } else if (conn.type === 'pgsql') {
-                    throw new Error(`PostgreSQL schemas unavailable via native driver.${nativeMsg}`.trim());
-                } else if (conn.type === 'oracle') {
-                    throw new Error(`Oracle schemas unavailable via native driver.${nativeMsg}`.trim());
-                } else if (conn.type === 'sqlserver' && conn.user && conn.password) {
-                    throw new Error(`SQL Server schemas unavailable via native driver.${nativeMsg}`.trim());
-                } else if (conn.type === 'sqlserver') {
-                    const q = "SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name";
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                    if (conn.user) parts.push(`-U "${conn.user}"`);
-                    if (conn.password) parts.push(`-P "${conn.password}"`);
-                    parts.push(`-i "${tmpFile}" -W -h -1`);
-                    const cmd = parts.join(' ');
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve(out)));
-                    });
-                    schemas = stdout
-                        .trim()
-                        .split('\n')
-                        .filter((s) => s.trim())
-                        .map((s) => s.trim());
-                }
-
+                const schemas = await dbNativeClientService.fetchSchemas(conn) ?? [];
                 const selected = await vscode.window.showQuickPick(schemas, { placeHolder: 'Select a schema' });
                 if (selected) {
                     await sqlTableProvider.refresh(selected);
                 }
             } catch (e) {
                 vscode.window.showErrorMessage('Failed to fetch schemas: ' + (e instanceof Error ? e.message : String(e)));
-            } finally {
-                try {
-                    fs.unlinkSync(tmpFile);
-                } catch {
-                    // ignore cleanup errors
-                }
             }
         }),
         vscode.commands.registerCommand('openbase.sqlRunner.tables.refresh', () => void sqlTableProvider.refresh()),

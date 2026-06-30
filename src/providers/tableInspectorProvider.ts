@@ -30,7 +30,6 @@ export interface TableInspectorProviderDeps {
     openScriptInSqlRunner: (content: string) => Promise<void>;
     openTerminal: (name: string, cwd: string, command: string) => void;
     getNonce: () => string;
-    dotnetToolsPath: () => string;
 }
 
 export interface TableInspectorProviderHandlers {
@@ -106,7 +105,7 @@ export function createTableInspectorProvider(deps: TableInspectorProviderDeps): 
         });
 
         const renderPanel = async (hasScaffold: boolean, entityName: string) => {
-            const details = await loadTableDetails(conn, schema, table, deps.dotnetToolsPath);
+            const details = await loadTableDetails(conn, schema, table);
             panel.webview.html = buildTableInspectorHtml(
                 nonce,
                 panel.webview.cspSource,
@@ -122,7 +121,7 @@ export function createTableInspectorProvider(deps: TableInspectorProviderDeps): 
 
         try {
             const [details, scaffoldEntity] = await Promise.all([
-                loadTableDetails(conn, schema, table, deps.dotnetToolsPath),
+                loadTableDetails(conn, schema, table),
                 cwd ? detectScaffoldEntity(cwd, table) : Promise.resolve(undefined),
             ]);
             const entityName = scaffoldEntity ?? tableToPascalCase(table);
@@ -225,7 +224,7 @@ export function createTableInspectorProvider(deps: TableInspectorProviderDeps): 
                 const batch = allTables.slice(i, i + BATCH);
                 const results = await Promise.all(batch.map(async ({ schema, table }) => {
                     try {
-                        const details = await loadTableDetails(conn, schema, table, deps.dotnetToolsPath);
+                        const details = await loadTableDetails(conn, schema, table);
                         const pkCols = new Set(details.constraints.filter((c) => c.type === 'PRIMARY KEY').map((c) => c.column));
                         const fkCols = new Set(details.constraints.filter((c) => c.type === 'FOREIGN KEY').map((c) => c.column));
                         return {

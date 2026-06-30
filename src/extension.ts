@@ -25,7 +25,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
-import { execSync, exec } from 'child_process';
+import { execSync } from 'child_process';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
@@ -481,95 +481,9 @@ async function httpRunner(): Promise<void> {
 }
 
 async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
-    try {
-        const native = await dbNativeClientService.loadSqlObjects(conn, targetSchema);
-        if (native) {
-            return native;
-        }
-    } catch (e) {
-        if (conn.type === 'pgsql') {
-            const msg = e instanceof Error ? e.message : String(e);
-            throw new Error(`PostgreSQL metadata unavailable via native driver: ${msg}`);
-        }
-        if (conn.type === 'oracle') {
-            const msg = e instanceof Error ? e.message : String(e);
-            throw new Error(`Oracle metadata unavailable via native driver: ${msg}`);
-        }
-        if (conn.type === 'sqlserver' && conn.user && conn.password) {
-            const msg = e instanceof Error ? e.message : String(e);
-            throw new Error(`SQL Server metadata unavailable via native driver: ${msg}`);
-        }
-        // Keep legacy CLI fallback for compatibility with environments where native drivers cannot connect.
-    }
-
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-    const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
-    let cmd = '';
-
-    const HEADER_COLS = new Set(['table_schema', 'table_name', 'owner', 'tablename', 'tableschema']);
-
-    try {
-        switch (conn.type) {
-            case 'sqlserver': {
-                const schemaFilter = targetSchema ? `WHERE TABLE_SCHEMA = '${targetSchema}'` : '';
-                const q = `
-                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES ${schemaFilter} AND TABLE_TYPE='BASE TABLE'
-                    UNION ALL
-                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ${targetSchema ? `WHERE ROUTINE_SCHEMA = '${targetSchema}'` : ''}
-                    ORDER BY TABLE_SCHEMA, TYPE, TABLE_NAME`;
-                fs.writeFileSync(tmpFile, q, 'utf-8');
-                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
-                if (conn.user)     parts.push(`-U "${conn.user}"`);
-                if (conn.password) parts.push(`-P "${conn.password}"`);
-                parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
-                cmd = parts.join(' ');
-                break;
-            }
-        }
-        
-        const stdout = await new Promise<string>((resolve, reject) => {
-            exec(cmd, { env, timeout: 15000 }, (err, out, stderr) => {
-                console.log('EXEC CMD:', cmd);
-                console.log('EXEC STDOUT:', out);
-                console.log('EXEC STDERR:', stderr);
-                if (err) console.log('EXEC ERROR:', err);
-                if (stderr) console.log('EXEC STDERR:', stderr);
-                
-                if (err && !out) reject(new Error(stderr || err.message));
-                else resolve(out);
-            });
-        });
-
-        const result = new Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>();
-        const sep = conn.type === 'pgsql' ? ',' : '|';
-
-        
-        for (const raw of stdout.split('\n')) {
-            const line = raw.trim();
-            if (!line || line.startsWith('---') || /^\d+ rows? selected/i.test(line)) continue;
-            
-            const parts = line.split(sep).map(p => p.replace(/^"|"$/g, '').trim());
-            if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) continue;
-            if (HEADER_COLS.has(parts[0].toLowerCase())) continue;
-            
-            const [schema, name, type] = parts;
-            
-            let entry = result.get(schema);
-            if (!entry) {
-                entry = { tables: [], procedures: [], functions: [], packages: [], dbType: conn.type };
-                result.set(schema, entry);
-            }
-            
-            if (type === 'TABLE') entry.tables.push(name);
-            else if (type === 'PROCEDURE') entry.procedures.push(name);
-            else if (type === 'FUNCTION') entry.functions.push(name);
-            else if (type === 'PACKAGE') entry.packages.push(name);
-        }
-        return result;
-    } finally {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
+    const result = await dbNativeClientService.loadSqlObjects(conn, targetSchema);
+    if (!result) throw new Error(`SQL objects unavailable for connection type: ${conn.type}`);
+    return result;
 }
 
 function buildSelectQuery(schema: string, table: string, dbType: DbTemplate): string {
@@ -616,7 +530,6 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         openTerminal,
         getNonce,
-        dotnetToolsPath,
     });
     setupSqlTableBrowser(context, {
         findConnection,
@@ -629,7 +542,6 @@ export function activate(context: vscode.ExtensionContext): void {
       },
         openTableInspector: tableInspectorHandlers.openTableInspector,
         openErDiagram: tableInspectorHandlers.openErDiagram,
-        dotnetToolsPath,
     });
     setupSqlScriptLibrary(context, {
       openScript: async (content: string, name: string) => {
