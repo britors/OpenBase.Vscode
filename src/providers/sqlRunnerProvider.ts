@@ -5,6 +5,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { DbConnection } from '../models/dbConnection';
 import { SqlRunnerService } from '../services/sqlRunner.service';
+import { DbNativeClientService } from '../services/dbNativeClient.service';
 import { buildSqlRunnerHtml } from './sqlRunnerHtml';
 
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
@@ -33,6 +34,7 @@ export class SqlRunnerProvider {
     private process: import('child_process').ChildProcess | undefined;
     private log: vscode.OutputChannel | undefined;
     private pendingScript: { content: string; name: string } | undefined;
+    private readonly dbNative = new DbNativeClientService();
 
     constructor(private readonly deps: SqlRunnerProviderDeps) {}
 
@@ -210,6 +212,43 @@ export class SqlRunnerProvider {
         }
 
         this.panel?.webview.postMessage({ command: 'explainRunning' });
+
+        try {
+            const nativeOutput = await this.dbNative.explainQuery(activeConn, sql);
+            if (nativeOutput !== undefined) {
+                const tree = this.deps.sqlRunnerService.parseExplainPlan(nativeOutput, activeConn.type);
+                this.panel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
+                return;
+            }
+            if (activeConn.type === 'pgsql') {
+                this.panel?.webview.postMessage({ command: 'explainError', text: 'PostgreSQL explain is available only through the native driver.' });
+                return;
+            }
+            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
+                this.panel?.webview.postMessage({ command: 'explainError', text: 'SQL Server explain with explicit credentials is available only through the native driver.' });
+                return;
+            }
+            if (activeConn.type === 'oracle') {
+                this.panel?.webview.postMessage({ command: 'explainError', text: 'Oracle explain is available only through the native driver.' });
+                return;
+            }
+        } catch (e: unknown) {
+            const text = e instanceof Error ? e.message : String(e);
+            if (activeConn.type === 'pgsql') {
+                this.panel?.webview.postMessage({ command: 'explainError', text: `PostgreSQL explain failed via native driver: ${text}` });
+                return;
+            }
+            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
+                this.panel?.webview.postMessage({ command: 'explainError', text: `SQL Server explain failed via native driver: ${text}` });
+                return;
+            }
+            if (activeConn.type === 'oracle') {
+                this.panel?.webview.postMessage({ command: 'explainError', text: `Oracle explain failed via native driver: ${text}` });
+                return;
+            }
+            this.out().appendLine(`[SQL Runner] Native explain fallback due to error: ${text}`);
+        }
+
         const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
         const extraPath = this.deps.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
@@ -226,22 +265,6 @@ export class SqlRunnerProvider {
                     if (activeConn.password) p.push(`-P "${activeConn.password}"`);
                     p.push(`-i "${tmpFile}"`);
                     cmd = p.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    explainSql = `EXPLAIN (FORMAT JSON)\n${sql}`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    const port = activeConn.port ?? '5432';
-                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
-                    const pass = encodeURIComponent(activeConn.password ?? '');
-                    const url = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                    cmd = `psql "${url}" -X -t -A -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    explainSql = `EXPLAIN PLAN FOR\n${sql};\nSELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);\nEXIT\n`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
                     break;
                 }
             }
@@ -279,6 +302,53 @@ export class SqlRunnerProvider {
         this.panel?.webview.postMessage({ command: 'running' });
         this.out().appendLine('[SQL Runner] Sent "running" to webview.');
 
+        try {
+            const nativeResult = await this.dbNative.executeQuery(activeConn, sql);
+            if (nativeResult !== undefined) {
+                this.out().appendLine(`[SQL Runner] Native driver result: ${nativeResult.columns.length} cols, ${nativeResult.rows.length} rows.`);
+                this.panel?.webview.postMessage({ command: 'result', ...nativeResult });
+
+                const prevEntries = this.deps.context.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
+                const newEntry: HistoryEntry = {
+                    sql,
+                    timestamp: Date.now(),
+                    connectionLabel: activeConn.label,
+                    rowCount: nativeResult.rows.length,
+                };
+                const updatedEntries = [newEntry, ...prevEntries].slice(0, SQL_HISTORY_LIMIT);
+                await this.deps.context.globalState.update(SQL_HISTORY_KEY, updatedEntries);
+                this.panel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
+                return;
+            }
+            if (activeConn.type === 'pgsql') {
+                this.panel?.webview.postMessage({ command: 'error', text: 'PostgreSQL execution is available only through the native driver.' });
+                return;
+            }
+            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
+                this.panel?.webview.postMessage({ command: 'error', text: 'SQL Server execution with explicit credentials is available only through the native driver.' });
+                return;
+            }
+            if (activeConn.type === 'oracle') {
+                this.panel?.webview.postMessage({ command: 'error', text: 'Oracle execution is available only through the native driver.' });
+                return;
+            }
+        } catch (e: unknown) {
+            const text = e instanceof Error ? e.message : String(e);
+            if (activeConn.type === 'pgsql') {
+                this.panel?.webview.postMessage({ command: 'error', text: `PostgreSQL execution failed via native driver: ${text}` });
+                return;
+            }
+            if (activeConn.type === 'sqlserver' && activeConn.user && activeConn.password) {
+                this.panel?.webview.postMessage({ command: 'error', text: `SQL Server execution failed via native driver: ${text}` });
+                return;
+            }
+            if (activeConn.type === 'oracle') {
+                this.panel?.webview.postMessage({ command: 'error', text: `Oracle execution failed via native driver: ${text}` });
+                return;
+            }
+            this.out().appendLine(`[SQL Runner] Native execution fallback due to error: ${text}`);
+        }
+
         const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
         const extraPath = this.deps.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
@@ -293,21 +363,6 @@ export class SqlRunnerProvider {
                     if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
                     parts.push(`-i "${tmpFile}" -s "|" -W`);
                     cmd = parts.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const port = activeConn.port ?? '5432';
-                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
-                    const pass = encodeURIComponent(activeConn.password ?? '');
-                    const url = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                    cmd = `psql "${url}" --csv -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    const script = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSET FEEDBACK ON\n${sql}\n/\nEXIT\n`;
-                    fs.writeFileSync(tmpFile, script, 'utf-8');
-                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
                     break;
                 }
             }

@@ -883,11 +883,19 @@
     "lint": "eslint src"
   },
   "devDependencies": {
+    "@types/mssql": "^12.3.0",
     "@types/node": "^20.19.43",
+    "@types/oracledb": "^7.0.1",
+    "@types/pg": "^8.20.0",
     "@types/vscode": "^1.90.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "mssql": "^12.6.0",
+    "oracledb": "^7.0.0",
+    "pg": "^8.22.0"
   }
 }

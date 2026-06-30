@@ -5,6 +5,7 @@ import { exec } from 'child_process';
 import * as vscode from 'vscode';
 import { DbConnection } from '../models/dbConnection';
 import { DbTemplate } from '../models/dbTemplate';
+import { DbNativeClientService } from '../services/dbNativeClient.service';
 
 type TableItemKind = 'schema' | 'table' | 'procedure' | 'message';
 
@@ -156,6 +157,7 @@ export interface SqlTableBrowserProviderDeps {
 }
 
 export function setupSqlTableBrowser(context: vscode.ExtensionContext, deps: SqlTableBrowserProviderDeps): void {
+    const dbNativeClientService = new DbNativeClientService();
     const sqlTableProvider = new SqlTableTreeProvider(deps.findConnection, deps.loadSqlTables);
 
     const treeView = vscode.window.createTreeView('openbase.sqlrunner.tables', {
@@ -181,35 +183,22 @@ export function setupSqlTableBrowser(context: vscode.ExtensionContext, deps: Sql
             const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
             try {
-                if (conn.type === 'oracle') {
-                    const q =
-                        "SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT DISTINCT username FROM all_users ORDER BY username;\nEXIT\n";
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve(out)));
-                    });
-                    schemas = stdout
-                        .trim()
-                        .split('\n')
-                        .filter((s) => s.trim() && !s.includes('USERNAME'))
-                        .map((s) => s.trim());
+                let nativeSchemas: string[] | undefined;
+                let nativeError: unknown;
+                try {
+                    nativeSchemas = await dbNativeClientService.fetchSchemas(conn);
+                } catch (e) {
+                    nativeError = e;
+                }
+                const nativeMsg = nativeError instanceof Error ? ` ${nativeError.message}` : '';
+                if (nativeSchemas && nativeSchemas.length) {
+                    schemas = nativeSchemas;
                 } else if (conn.type === 'pgsql') {
-                    const q =
-                        "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name";
-                    fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const port = conn.port ?? '5432';
-                    const u = encodeURIComponent(conn.user ?? 'postgres');
-                    const p = encodeURIComponent(conn.password ?? '');
-                    const cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" -t -A -f "${tmpFile}"`;
-                    const stdout = await new Promise<string>((resolve, reject) => {
-                        exec(cmd, { env }, (err, out, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve(out)));
-                    });
-                    schemas = stdout
-                        .trim()
-                        .split('\n')
-                        .filter((s) => s.trim())
-                        .map((s) => s.trim());
+                    throw new Error(`PostgreSQL schemas unavailable via native driver.${nativeMsg}`.trim());
+                } else if (conn.type === 'oracle') {
+                    throw new Error(`Oracle schemas unavailable via native driver.${nativeMsg}`.trim());
+                } else if (conn.type === 'sqlserver' && conn.user && conn.password) {
+                    throw new Error(`SQL Server schemas unavailable via native driver.${nativeMsg}`.trim());
                 } else if (conn.type === 'sqlserver') {
                     const q = "SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name";
                     fs.writeFileSync(tmpFile, q, 'utf-8');

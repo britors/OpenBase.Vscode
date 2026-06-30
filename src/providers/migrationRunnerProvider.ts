@@ -4,6 +4,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { exec } from 'child_process';
 import { DbConnection } from '../models/dbConnection';
+import { DbNativeClientService } from '../services/dbNativeClient.service';
+
+const dbNativeClientService = new DbNativeClientService();
 
 type MigrationEngineType = 'efcore' | 'fluentmigrator';
 
@@ -280,6 +283,66 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
     }
 
     private async getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
+        if (conn.type === 'pgsql') {
+            try {
+                const nativeSql = 'SELECT "MigrationId" FROM "__EFMigrationsHistory"';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).MigrationId ?? '').trim();
+                        if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native PostgreSQL query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied EF migrations from PostgreSQL via native driver.');
+            }
+        }
+
+        if (conn.type === 'sqlserver' && conn.user && conn.password) {
+            try {
+                const nativeSql = 'SELECT [MigrationId] FROM [dbo].[__EFMigrationsHistory]';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).MigrationId ?? '').trim();
+                        if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native SQL Server query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied EF migrations from SQL Server via native driver.');
+            }
+        }
+
+        if (conn.type === 'oracle') {
+            try {
+                const nativeSql = 'SELECT "MigrationId" FROM "__EFMigrationsHistory"';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).MigrationId ?? '').trim();
+                        if (id && !/^(MigrationId|-{2,}|\d+ rows?)/i.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native Oracle query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied EF migrations from Oracle via native driver.');
+            }
+        }
+
         const extraPath = this.deps.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
@@ -293,23 +356,6 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
                     if (conn.password) parts.push(`-P "${conn.password}"`);
                     parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
                     cmd = parts.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    fs.writeFileSync(tmpFile, 'SELECT "MigrationId" FROM "__EFMigrationsHistory"', 'utf-8');
-                    const port = conn.port ?? '5432';
-                    const u = encodeURIComponent(conn.user ?? 'postgres');
-                    const p = encodeURIComponent(conn.password ?? '');
-                    cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    fs.writeFileSync(
-                        tmpFile,
-                        "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT \"MigrationId\" FROM \"__EFMigrationsHistory\";\n/\nEXIT\n",
-                        'utf-8'
-                    );
-                    cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                     break;
                 }
                 default:
@@ -434,6 +480,66 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
     }
 
     private async getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> {
+        if (conn.type === 'pgsql') {
+            try {
+                const nativeSql = 'SELECT CAST("Version" AS VARCHAR) AS "Version" FROM "VersionInfo"';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).Version ?? '').trim();
+                        if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native PostgreSQL query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied Fluent migrations from PostgreSQL via native driver.');
+            }
+        }
+
+        if (conn.type === 'sqlserver' && conn.user && conn.password) {
+            try {
+                const nativeSql = 'SELECT CAST([Version] AS VARCHAR(50)) AS [Version] FROM [VersionInfo]';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).Version ?? '').trim();
+                        if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native SQL Server query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied Fluent migrations from SQL Server via native driver.');
+            }
+        }
+
+        if (conn.type === 'oracle') {
+            try {
+                const nativeSql = 'SELECT CAST("Version" AS VARCHAR2(50)) AS "Version" FROM "VersionInfo"';
+                const nativeResult = await dbNativeClientService.executeQuery(conn, nativeSql);
+                if (nativeResult) {
+                    const applied = new Set<string>();
+                    for (const row of nativeResult.rows) {
+                        const id = Array.isArray(row)
+                            ? String(row[0] ?? '').trim()
+                            : String((row as Record<string, unknown>).Version ?? '').trim();
+                        if (id && !/^(Version|-{2,}|\d+ rows?)/i.test(id) && /^\d+$/.test(id)) applied.add(id);
+                    }
+                    return applied;
+                }
+                throw new Error('Native Oracle query returned no result.');
+            } catch {
+                throw new Error('Failed to load applied Fluent migrations from Oracle via native driver.');
+            }
+        }
+
         const extraPath = this.deps.dotnetToolsPath();
         const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
         const tmpFile = path.join(os.tmpdir(), `ob_fmmig_${Date.now()}.sql`);
@@ -447,23 +553,6 @@ class MigrationTreeProvider implements vscode.TreeDataProvider<MigrationItem> {
                     if (conn.password) p.push(`-P "${conn.password}"`);
                     p.push(`-i "${tmpFile}" -s "|" -W -h -1`);
                     cmd = p.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    fs.writeFileSync(tmpFile, 'SELECT CAST("Version" AS VARCHAR) FROM "VersionInfo"', 'utf-8');
-                    const port = conn.port ?? '5432';
-                    const u = encodeURIComponent(conn.user ?? 'postgres');
-                    const p = encodeURIComponent(conn.password ?? '');
-                    cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    fs.writeFileSync(
-                        tmpFile,
-                        "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT CAST(\"Version\" AS VARCHAR(50)) FROM \"VersionInfo\";\n/\nEXIT\n",
-                        'utf-8'
-                    );
-                    cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                     break;
                 }
                 default:
