@@ -2,10 +2,12 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { exec } from 'child_process';
 import { DbConnection } from '../models/dbConnection';
 import { SqlRunnerService } from '../services/sqlRunner.service';
+import { DbNativeClientService } from '../services/dbNativeClient.service';
 import { buildSqlRunnerHtml } from './sqlRunnerHtml';
+
+type CompletionItem = { schema: string; name: string; kind: 'table' | 'function' | 'procedure' };
 
 const SQL_HISTORY_KEY = 'sqlQueryHistory';
 const SQL_HISTORY_LIMIT = 50;
@@ -21,7 +23,6 @@ interface HistoryEntry {
 export interface SqlRunnerProviderDeps {
     context: vscode.ExtensionContext;
     findConnection: (cwd: string) => DbConnection | undefined;
-    dotnetToolsPath: () => string;
     getScriptsDir: () => string | undefined;
     onScriptSaved: () => void;
     onSendToSpecialist: (sql: string) => Promise<void>;
@@ -30,9 +31,10 @@ export interface SqlRunnerProviderDeps {
 
 export class SqlRunnerProvider {
     private panel: vscode.WebviewPanel | undefined;
-    private process: import('child_process').ChildProcess | undefined;
     private log: vscode.OutputChannel | undefined;
     private pendingScript: { content: string; name: string } | undefined;
+    private readonly dbNative = new DbNativeClientService();
+    private completionCache: CompletionItem[] = [];
 
     constructor(private readonly deps: SqlRunnerProviderDeps) {}
 
@@ -119,6 +121,13 @@ export class SqlRunnerProvider {
             }
             const historyEntries = this.deps.context.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
             this.panel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
+            void this.preloadCompletions();
+            return;
+        }
+
+        if (msg.command === 'refreshCompletions') {
+            this.completionCache = [];
+            void this.preloadCompletions();
             return;
         }
 
@@ -152,8 +161,6 @@ export class SqlRunnerProvider {
         }
 
         if (msg.command === 'cancel') {
-            this.process?.kill();
-            this.process = undefined;
             this.panel?.webview.postMessage({ command: 'cancelled' });
             return;
         }
@@ -197,6 +204,26 @@ export class SqlRunnerProvider {
         await this.handleRun(msg.sql.trim());
     }
 
+    private async preloadCompletions(): Promise<void> {
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const conn = cwd ? this.deps.findConnection(cwd) : undefined;
+        if (!conn) return;
+        try {
+            const objects = await this.dbNative.loadSqlObjects(conn);
+            if (!objects) return;
+            const items: CompletionItem[] = [];
+            for (const [schema, obj] of objects) {
+                for (const name of obj.tables)     items.push({ schema, name, kind: 'table' });
+                for (const name of obj.functions)  items.push({ schema, name, kind: 'function' });
+                for (const name of obj.procedures) items.push({ schema, name, kind: 'procedure' });
+            }
+            this.completionCache = items;
+            this.panel?.webview.postMessage({ command: 'loadCompletions', items });
+        } catch {
+            // ignore — completions are best-effort
+        }
+    }
+
     private async handleExplain(sqlRaw?: string): Promise<void> {
         if (!sqlRaw?.trim()) return;
 
@@ -210,56 +237,14 @@ export class SqlRunnerProvider {
         }
 
         this.panel?.webview.postMessage({ command: 'explainRunning' });
-        const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
 
         try {
-            let explainSql = '';
-            let cmd = '';
-            switch (activeConn.type) {
-                case 'sqlserver': {
-                    explainSql = `SET SHOWPLAN_TEXT ON\nGO\n${sql}\nGO\nSET SHOWPLAN_TEXT OFF\nGO\n`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    const p = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
-                    if (activeConn.user) p.push(`-U "${activeConn.user}"`);
-                    if (activeConn.password) p.push(`-P "${activeConn.password}"`);
-                    p.push(`-i "${tmpFile}"`);
-                    cmd = p.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    explainSql = `EXPLAIN (FORMAT JSON)\n${sql}`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    const port = activeConn.port ?? '5432';
-                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
-                    const pass = encodeURIComponent(activeConn.password ?? '');
-                    const url = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                    cmd = `psql "${url}" -X -t -A -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    explainSql = `EXPLAIN PLAN FOR\n${sql};\nSELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);\nEXIT\n`;
-                    fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
-                    break;
-                }
-            }
-
-            const output = await new Promise<string>((resolve, reject) => {
-                exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
-                    if (err && !stdout) reject(new Error(stderr || err.message));
-                    else resolve(stdout + (stderr ? `\n${stderr}` : ''));
-                });
-            });
-
+            const output = await this.dbNative.explainQuery(activeConn, sql);
             const tree = this.deps.sqlRunnerService.parseExplainPlan(output, activeConn.type);
             this.panel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
             this.panel?.webview.postMessage({ command: 'explainError', text });
-        } finally {
-            try { fs.unlinkSync(tmpFile); } catch { }
         }
     }
 
@@ -279,52 +264,8 @@ export class SqlRunnerProvider {
         this.panel?.webview.postMessage({ command: 'running' });
         this.out().appendLine('[SQL Runner] Sent "running" to webview.');
 
-        const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
-        const extraPath = this.deps.dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
-        let cmd = '';
-
         try {
-            switch (activeConn.type) {
-                case 'sqlserver': {
-                    fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
-                    if (activeConn.user) parts.push(`-U "${activeConn.user}"`);
-                    if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
-                    parts.push(`-i "${tmpFile}" -s "|" -W`);
-                    cmd = parts.join(' ');
-                    break;
-                }
-                case 'pgsql': {
-                    fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const port = activeConn.port ?? '5432';
-                    const user = encodeURIComponent(activeConn.user ?? 'postgres');
-                    const pass = encodeURIComponent(activeConn.password ?? '');
-                    const url = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                    cmd = `psql "${url}" --csv -f "${tmpFile}"`;
-                    break;
-                }
-                case 'oracle': {
-                    const script = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSET FEEDBACK ON\n${sql}\n/\nEXIT\n`;
-                    fs.writeFileSync(tmpFile, script, 'utf-8');
-                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
-                    break;
-                }
-            }
-
-            this.out().appendLine(`[SQL Runner] Executing: ${cmd.replace(/(-P\s*")[^"]*"/, '-P "***"')}`);
-
-            const output = await new Promise<string>((resolve, reject) => {
-                const child = exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
-                    this.process = undefined;
-                    this.out().appendLine(`[SQL Runner] exec done. err=${err?.message ?? 'none'} stdout=${stdout.length}b stderr=${stderr.length}b`);
-                    if (err && !stdout) reject(new Error(stderr || err.message));
-                    else resolve(stdout + (stderr ? `\n${stderr}` : ''));
-                });
-                this.process = child;
-            });
-
-            const result = this.deps.sqlRunnerService.parseSqlOutput(output, activeConn.type);
+            const result = await this.dbNative.executeQuery(activeConn, sql);
             this.out().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
             this.panel?.webview.postMessage({ command: 'result', ...result });
 
@@ -342,8 +283,6 @@ export class SqlRunnerProvider {
             const text = e instanceof Error ? e.message : String(e);
             this.out().appendLine(`[SQL Runner] Error: ${text}`);
             this.panel?.webview.postMessage({ command: 'error', text });
-        } finally {
-            try { fs.unlinkSync(tmpFile); } catch { }
         }
     }
 }
