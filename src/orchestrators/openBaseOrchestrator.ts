@@ -55,7 +55,15 @@ export class OpenBaseOrchestrator {
         const reg = (id: string, fn: (...args: any[]) => any) =>
             this.context.subscriptions.push(vscode.commands.registerCommand(id, fn));
 
-        reg('openbase.newProject', createNewProjectCommand(this.cliService, this.workspaceService, this.settingsService));
+        const newProjectWizard = createNewProjectCommand(this.cliService, this.workspaceService, this.settingsService);
+        reg('openbase.newProject', async (...args: unknown[]) => {
+            try {
+                await vscode.commands.executeCommand('workbench.view.extension.openbase');
+                await vscode.commands.executeCommand('openbase.panel.focus');
+            } catch {
+                await newProjectWizard(args[0] as vscode.Uri | undefined);
+            }
+        });
         reg('openbase.scaffold', createScaffoldCommand(this.cliService, this.workspaceService));
         reg('openbase.scaffoldUpdate', createScaffoldUpdateCommand(this.cliService, this.workspaceService));
         reg('openbase.specialist', createSpecialistCommand(this.cliService, this.workspaceService));

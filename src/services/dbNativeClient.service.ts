@@ -1,5 +1,4 @@
-import * as mssql from 'mssql';
-import { Client as PgClient } from 'pg';
+import type * as mssql from 'mssql';
 import oracledb from 'oracledb';
 import { DbConnection } from '../models/dbConnection';
 import { SqlQueryResult } from './sqlRunner.service';
@@ -35,6 +34,39 @@ function toCell(value: unknown): string {
 }
 
 export class DbNativeClientService {
+    private getPgClientCtor(): new (config: {
+        host: string;
+        port: number;
+        user: string;
+        password: string;
+        database: string;
+    }) => {
+        connect: () => Promise<void>;
+        query: (sql: string) => Promise<{
+            rows: Array<Record<string, unknown>>;
+            fields?: Array<{ name: string }>;
+            command?: string;
+            rowCount?: number;
+        }>;
+        end: () => Promise<void>;
+    } {
+        try {
+            // Lazy load prevents extension activation crash when dependency packaging is broken.
+            return require('pg').Client;
+        } catch {
+            throw new Error("PostgreSQL native driver 'pg' is unavailable. Reinstall the extension package.");
+        }
+    }
+
+    private getMssqlModule(): typeof mssql {
+        try {
+            // Lazy load prevents extension activation crash when dependency packaging is broken.
+            return require('mssql') as typeof mssql;
+        } catch {
+            throw new Error("SQL Server native driver 'mssql' is unavailable. Reinstall the extension package.");
+        }
+    }
+
     async executeQuery(conn: DbConnection, sql: string): Promise<SqlQueryResult> {
         if (conn.type === 'pgsql') return this.executePg(conn, sql);
         if (conn.type === 'sqlserver') return this.executeSqlServer(conn, sql);
@@ -44,6 +76,7 @@ export class DbNativeClientService {
 
     async explainQuery(conn: DbConnection, sql: string): Promise<string> {
         if (conn.type === 'pgsql') {
+            const PgClient = this.getPgClientCtor();
             const client = new PgClient({
                 host: conn.server,
                 port: Number(conn.port ?? '5432'),
@@ -99,6 +132,7 @@ export class DbNativeClientService {
 
     async fetchSchemas(conn: DbConnection): Promise<string[] | undefined> {
         if (conn.type === 'pgsql') {
+            const PgClient = this.getPgClientCtor();
             const client = new PgClient({
                 host: conn.server,
                 port: Number(conn.port ?? '5432'),
@@ -151,6 +185,7 @@ export class DbNativeClientService {
 
     async loadSqlObjects(conn: DbConnection, targetSchema?: string): Promise<Map<string, SqlObjects> | undefined> {
         if (conn.type === 'pgsql') {
+            const PgClient = this.getPgClientCtor();
             const client = new PgClient({
                 host: conn.server,
                 port: Number(conn.port ?? '5432'),
@@ -212,6 +247,7 @@ export class DbNativeClientService {
 
     async loadTableDetails(conn: DbConnection, schema: string, table: string): Promise<NativeTableDetails | undefined> {
         if (conn.type === 'pgsql') {
+            const PgClient = this.getPgClientCtor();
             const client = new PgClient({
                 host: conn.server,
                 port: Number(conn.port ?? '5432'),
@@ -393,6 +429,7 @@ export class DbNativeClientService {
     }
 
     private async executePg(conn: DbConnection, sql: string): Promise<SqlQueryResult> {
+        const PgClient = this.getPgClientCtor();
         const client = new PgClient({
             host: conn.server,
             port: Number(conn.port ?? '5432'),
@@ -469,6 +506,7 @@ export class DbNativeClientService {
     }
 
     private async connectSqlServer(conn: DbConnection, poolOpts?: { max?: number }): Promise<mssql.ConnectionPool> {
+        const sqlServer = this.getMssqlModule();
         const useWindowsAuth = !conn.user || !conn.password;
         const config: mssql.config = {
             server: conn.server,
@@ -493,7 +531,7 @@ export class DbNativeClientService {
             config.pool = { ...config.pool, ...poolOpts };
         }
 
-        const pool = new mssql.ConnectionPool(config);
+        const pool = new sqlServer.ConnectionPool(config);
         await pool.connect();
         return pool;
     }
