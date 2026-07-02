@@ -11,9 +11,7 @@ VS Code extension that exposes [OpenBase CLI](https://github.com/britors/OpenBas
 *   **Quick Access**: Acesso rápido a todos os comandos via `OpenBase: Quick Access` na Paleta de Comandos.
 *   **Status Bar**: Indicador de atividade na barra de status inferior.
 *   **Walkthrough**: Tutorial interativo para novos usuários ("Começando com OpenBase").
-*   **SQL Runner**: Editor SQL com drivers nativos (SQL Server, PostgreSQL, Oracle), autocomplete de tabelas/views e geração de ER Diagram — sem dependência de CLIs externas.
-*   **HTTP Runner**: Cliente HTTP integrado com suporte a variáveis de ambiente.
-*   **Migration Runner**: Execução e controle de migrações diretamente no editor.
+*   **Runners Integrados**: SQL Runner (com ER Diagram), HTTP Runner (com suporte a env vars), Migration Runner.
 *   **Exploradores**: Solution Explorer e Dependency Inspector (com atualização automática).
 
 ## Prerequisites
@@ -25,7 +23,7 @@ dotnet tool install -g w3ti.OpenBase.CLI
 openbase install
 ```
 
-> Requires .NET SDK 10 or later. SQL Runner connects directly to SQL Server, PostgreSQL and Oracle via native Node.js drivers — no `sqlcmd`, `psql` or `sqlplus` required.
+> Requires .NET SDK 10 or later.
 
 ## Installation
 
