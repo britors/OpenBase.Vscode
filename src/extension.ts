@@ -6,6 +6,9 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
 import { execSync, exec, spawn } from 'child_process';
+import { RunnerSidebarProvider } from './providers/runnerSidebarProvider';
+import { buildDbCliEnv, createDbCliToolResolver, type DbCliTool } from './runners/dbCliTools';
+import { parseExplainPlan, parseSqlOutput, type ExplainNode } from './runners/sqlRunnerRuntime';
 
 const DB_TEMPLATES = ['sqlserver', 'pgsql', 'oracle'] as const;
 const BUILD_CONFIGS = ['Debug', 'Release'] as const;
@@ -17,6 +20,14 @@ type DbTemplate = typeof DB_TEMPLATES[number];
 
 function dotnetToolsPath(): string {
     return path.join(os.homedir(), '.dotnet', 'tools');
+}
+
+function dbCliEnv(): NodeJS.ProcessEnv {
+    return buildDbCliEnv(dotnetToolsPath());
+}
+
+function resolveDbTool(tool: DbCliTool): string {
+    return createDbCliToolResolver(vscode.workspace.getConfiguration('openbase')).resolve(tool);
 }
 
 function isOpenBaseInstalled(): boolean {
@@ -79,6 +90,17 @@ async function guardInstalled(): Promise<boolean> {
 let panelProvider: OpenBasePanelProvider | undefined;
 let extContext: vscode.ExtensionContext | undefined;
 let diagnosticCollection: vscode.DiagnosticCollection;
+
+interface OpenBaseAppState {
+    sqlPanel?: vscode.WebviewPanel;
+    sqlProcess?: import('child_process').ChildProcess;
+    sqlLog?: vscode.OutputChannel;
+    sqlTableProvider?: SqlTableTreeProvider;
+    sqlPendingScript?: { content: string; name: string };
+    sqlScriptProvider?: SqlScriptTreeProvider;
+}
+
+const appState: OpenBaseAppState = {};
 
 // ─── new ────────────────────────────────────────────────────────────────────
 
@@ -1431,44 +1453,6 @@ function findConnection(cwd: string): DbConnection | undefined {
 }
 
 
-function parseSqlOutput(raw: string, type: DbConnection['type']): { columns: string[]; rows: string[][]; message?: string } {
-    const lines = raw.split('\n').map(l => l.trimEnd()).filter(Boolean);
-
-    if (type === 'pgsql') {
-        if (!lines.length) return { columns: [], rows: [] };
-        const nonTable = lines.find(l => /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|DO)\b/i.test(l));
-        if (nonTable) return { columns: [], rows: [], message: lines.join('\n') };
-        const parseCSV = (line: string): string[] => {
-            const res: string[] = []; let cur = ''; let inQ = false;
-            for (const ch of line) {
-                if (ch === '"') { inQ = !inQ; continue; }
-                if (ch === ',' && !inQ) { res.push(cur); cur = ''; continue; }
-                cur += ch;
-            }
-            res.push(cur); return res;
-        };
-        const [header, ...rest] = lines;
-        return { columns: parseCSV(header), rows: rest.map(parseCSV) };
-    }
-
-    if (type === 'sqlserver') {
-        const affected = lines.find(l => /^\(\d+ rows? affected\)/i.test(l));
-        const dataLines = lines.filter(l => !/^[-| ]+$/.test(l) && !/^\(\d+ rows? affected\)/i.test(l));
-        if (!dataLines.length) return { columns: [], rows: [], message: affected ?? 'Command completed.' };
-        const columns = dataLines[0].split('|').map(c => c.trim()).filter(Boolean);
-        const rows = dataLines.slice(1).map(l => l.split('|').map(c => c.trim()));
-        return { columns, rows, message: affected };
-    }
-
-    // oracle
-    const dataLines = lines.filter(l => !/^[-]+$/.test(l) && !/^\d+ rows? selected/i.test(l) && !/^Disconnected/.test(l));
-    if (!dataLines.length) return { columns: [], rows: [], message: lines.join('\n') };
-    if (!dataLines[0].includes('|')) return { columns: [], rows: [], message: lines.join('\n') };
-    const columns = dataLines[0].split('|').map(c => c.trim()).filter(Boolean);
-    const rows = dataLines.slice(1).map(l => l.split('|').map(c => c.trim()));
-    return { columns, rows };
-}
-
 function getNonce(): string {
     let text = '';
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -1538,136 +1522,37 @@ interface HistoryEntry {
     rowCount: number;
 }
 
-interface ExplainNode {
-    op: string;
-    detail: string;
-    cost: number;
-    rows: number;
-    children: ExplainNode[];
-}
-
-function pgPlanToNode(plan: Record<string, unknown>): ExplainNode {
-    const nodeType = String(plan['Node Type'] ?? 'Unknown');
-    const parts: string[] = [];
-    if (plan['Relation Name']) parts.push(String(plan['Relation Name']));
-    if (plan['Index Name'])    parts.push(`idx:${plan['Index Name']}`);
-    if (plan['Filter'])        parts.push(`filter:${String(plan['Filter']).slice(0, 80)}`);
-    if (plan['Join Filter'])   parts.push(`join:${String(plan['Join Filter']).slice(0, 80)}`);
-    const children: ExplainNode[] = [];
-    if (Array.isArray(plan['Plans'])) {
-        for (const child of plan['Plans'] as Record<string, unknown>[]) children.push(pgPlanToNode(child));
-    }
-    return { op: nodeType, detail: parts.join(' · '), cost: Number(plan['Total Cost'] ?? 0), rows: Number(plan['Plan Rows'] ?? 0), children };
-}
-
-function parsePgExplain(output: string): ExplainNode {
-    try {
-        const s = output.trim();
-        const start = s.indexOf('['), end = s.lastIndexOf(']');
-        if (start < 0 || end < 0) throw new Error('no json');
-        const json = JSON.parse(s.slice(start, end + 1)) as Array<{ Plan: Record<string, unknown> }>;
-        const plan = json[0]?.Plan;
-        if (!plan) throw new Error('no plan');
-        return pgPlanToNode(plan);
-    } catch {
-        return { op: 'Parse error', detail: output.slice(0, 300), cost: 0, rows: 0, children: [] };
-    }
-}
-
-function parseSsTextPlan(output: string): ExplainNode {
-    const nodeLines = output.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.includes('|--'));
-    if (!nodeLines.length) return { op: 'No plan', detail: output.replace(/\r?\n/g, ' ').slice(0, 200), cost: 0, rows: 0, children: [] };
-    const items = nodeLines.map(l => {
-        const idx = l.indexOf('|--');
-        const level = Math.round(idx / 3);
-        const text = l.slice(idx + 3).trim();
-        const rowM = text.match(/EstimateRows[=\s]+([0-9.]+)/i);
-        const opEnd = text.indexOf('(');
-        return {
-            level,
-            op: opEnd > 0 ? text.slice(0, opEnd).trim() : text,
-            detail: opEnd > 0 ? text.slice(opEnd + 1).replace(/\)$/, '').slice(0, 120) : '',
-            cost: 0,
-            rows: rowM ? Number(rowM[1]) : 0,
-        };
-    });
-    const stack: Array<ExplainNode & { level: number }> = [];
-    let root: (ExplainNode & { level: number }) | undefined;
-    for (const item of items) {
-        const node = { ...item, children: [] as ExplainNode[] };
-        while (stack.length && stack[stack.length - 1].level >= item.level) stack.pop();
-        if (!stack.length) root = node; else stack[stack.length - 1].children.push(node);
-        stack.push(node);
-    }
-    return root ?? { op: 'No plan', detail: '', cost: 0, rows: 0, children: [] };
-}
-
-function parseOraclePlan(output: string): ExplainNode {
-    const dataLines = output.split('\n').map(l => l.replace(/\r$/, '')).filter(l => /^\|\s*\d/.test(l));
-    if (!dataLines.length) return { op: 'No plan', detail: output.slice(0, 200), cost: 0, rows: 0, children: [] };
-    const items = dataLines.map(l => {
-        const cols = l.split('|').map(c => c.trim()).filter((_, i) => i > 0);
-        const rawOp = cols[1] ?? '';
-        return {
-            level: Math.floor((rawOp.length - rawOp.trimStart().length) / 2),
-            op: rawOp.trim(),
-            detail: cols[2] ?? '',
-            cost: parseInt((cols[5] ?? '').replace(/\s*\(.*/, ''), 10) || 0,
-            rows: parseInt(cols[3] ?? '0', 10) || 0,
-        };
-    });
-    const stack: Array<ExplainNode & { level: number }> = [];
-    let root: (ExplainNode & { level: number }) | undefined;
-    for (const item of items) {
-        const node = { ...item, children: [] as ExplainNode[] };
-        while (stack.length && stack[stack.length - 1].level >= item.level) stack.pop();
-        if (!stack.length) root = node; else stack[stack.length - 1].children.push(node);
-        stack.push(node);
-    }
-    return root ?? { op: 'No plan', detail: '', cost: 0, rows: 0, children: [] };
-}
-
-function parseExplainPlan(output: string, dbType: string): ExplainNode {
-    if (dbType === 'pgsql')   return parsePgExplain(output);
-    if (dbType === 'oracle')  return parseOraclePlan(output);
-    return parseSsTextPlan(output);
-}
-
-let sqlPanel: vscode.WebviewPanel | undefined;
-let sqlProcess: import('child_process').ChildProcess | undefined;
-let sqlLog: vscode.OutputChannel | undefined;
-
 function sqlOut(): vscode.OutputChannel {
-    if (!sqlLog) sqlLog = vscode.window.createOutputChannel('OpenBase SQL Runner (Debug)');
-    return sqlLog;
+    if (!appState.sqlLog) appState.sqlLog = vscode.window.createOutputChannel('OpenBase SQL Runner (Debug)');
+    return appState.sqlLog;
 }
 
 async function sqlRunner(): Promise<void> {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const conn = cwd ? findConnection(cwd) : undefined;
 
-    if (sqlPanel) {
-        sqlPanel.reveal(vscode.ViewColumn.One);
+    if (appState.sqlPanel) {
+        appState.sqlPanel.reveal(vscode.ViewColumn.One);
         return;
     }
 
     sqlOut().appendLine(`[SQL Runner] Opening panel. cwd=${cwd ?? '(none)'}`);
     sqlOut().appendLine(`[SQL Runner] Connection detected: ${conn ? conn.label : '(none)'}`);
 
-    sqlPanel = vscode.window.createWebviewPanel(
+    appState.sqlPanel = vscode.window.createWebviewPanel(
         'openbase.sqlRunner', 'OpenBase SQL', vscode.ViewColumn.One,
         { enableScripts: true, retainContextWhenHidden: true }
     );
-    sqlPanel.onDidDispose(() => { sqlPanel = undefined; sqlOut().appendLine('[SQL Runner] Panel disposed.'); });
+    appState.sqlPanel.onDidDispose(() => { appState.sqlPanel = undefined; sqlOut().appendLine('[SQL Runner] Panel disposed.'); });
     const sqlNonce = getNonce();
-    sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, sqlPanel.webview.cspSource);
+    appState.sqlPanel.webview.html = buildSqlRunnerHtml(conn, sqlNonce, appState.sqlPanel.webview.cspSource);
 
     const savedSql = extContext?.globalState.get<string>(SQL_AUTOSAVE_KEY);
-    if (savedSql && !sqlPendingScript) {
-        sqlPendingScript = { content: savedSql, name: 'autosave' };
+    if (savedSql && !appState.sqlPendingScript) {
+        appState.sqlPendingScript = { content: savedSql, name: 'autosave' };
     }
 
-    sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string; table?: string; keyColumn?: string; keyValue?: string; column?: string; newValue?: string }) => {
+    appState.sqlPanel.webview.onDidReceiveMessage(async (msg: { command: string; sql?: string; csvData?: string; csvName?: string; table?: string; keyColumn?: string; keyValue?: string; column?: string; newValue?: string }) => {
         sqlOut().appendLine(`[SQL Runner] Message received: ${msg.command}`);
 
         if (msg.command === 'autoSave' && msg.sql) {
@@ -1679,13 +1564,13 @@ async function sqlRunner(): Promise<void> {
         }
 
         if (msg.command === 'ready') {
-            if (sqlPendingScript) {
-                const pending = sqlPendingScript;
-                sqlPendingScript = undefined;
-                sqlPanel?.webview.postMessage({ command: 'loadScript', content: pending.content, name: pending.name });
+            if (appState.sqlPendingScript) {
+                const pending = appState.sqlPendingScript;
+                appState.sqlPendingScript = undefined;
+                appState.sqlPanel?.webview.postMessage({ command: 'loadScript', content: pending.content, name: pending.name });
             }
             const historyEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
-            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
+            appState.sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: historyEntries });
             return;
         }
 
@@ -1703,20 +1588,20 @@ async function sqlRunner(): Promise<void> {
             fs.mkdirSync(scriptsDir, { recursive: true });
             fs.writeFileSync(path.join(scriptsDir, safeName), msg.sql, 'utf-8');
             vscode.window.showInformationMessage(`Script saved: ${safeName}`);
-            sqlScriptProvider?.refresh();
+            appState.sqlScriptProvider?.refresh();
             return;
         }
 
         if (msg.command === 'clearHistory') {
             await extContext?.globalState.update(SQL_HISTORY_KEY, []);
-            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: [] });
+            appState.sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: [] });
             return;
         }
 
         if (msg.command === 'cancel') {
-            sqlProcess?.kill();
-            sqlProcess = undefined;
-            sqlPanel?.webview.postMessage({ command: 'cancelled' });
+            appState.sqlProcess?.kill();
+            appState.sqlProcess = undefined;
+            appState.sqlPanel?.webview.postMessage({ command: 'cancelled' });
             return;
         }
 
@@ -1737,7 +1622,7 @@ async function sqlRunner(): Promise<void> {
             if (!msg.table || !msg.keyColumn || !msg.column) return;
             const quoteVal = (v: string) => /^-?\d+(\.\d+)?$/.test(v) ? v : `'${v.replace(/'/g, "''")}'`;
             const updateSql = `UPDATE ${msg.table}\nSET ${msg.column} = ${quoteVal(msg.newValue ?? '')}\nWHERE ${msg.keyColumn} = ${quoteVal(msg.keyValue ?? '')};`;
-            sqlPanel?.webview.postMessage({ command: 'loadScript', content: updateSql, name: 'update' });
+            appState.sqlPanel?.webview.postMessage({ command: 'loadScript', content: updateSql, name: 'update' });
             return;
         }
 
@@ -1753,13 +1638,12 @@ async function sqlRunner(): Promise<void> {
             const activeCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             const activeConn = activeCwd ? findConnection(activeCwd) : undefined;
             if (!activeConn) {
-                sqlPanel?.webview.postMessage({ command: 'explainError', text: 'No connection configured.' });
+                appState.sqlPanel?.webview.postMessage({ command: 'explainError', text: 'No connection configured.' });
                 return;
             }
-            sqlPanel?.webview.postMessage({ command: 'explainRunning' });
+            appState.sqlPanel?.webview.postMessage({ command: 'explainRunning' });
             const tmpFile = path.join(os.tmpdir(), `ob_explain_${Date.now()}.sql`);
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+            const env = dbCliEnv();
             try {
                 let explainSql = '';
                 let cmd = '';
@@ -1767,7 +1651,7 @@ async function sqlRunner(): Promise<void> {
                     case 'sqlserver': {
                         explainSql = `SET SHOWPLAN_TEXT ON\nGO\n${sql}\nGO\nSET SHOWPLAN_TEXT OFF\nGO\n`;
                         fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                        const p = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
+                        const p = [resolveDbTool('sqlcmd'), `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
                         if (activeConn.user)     p.push(`-U "${activeConn.user}"`);
                         if (activeConn.password) p.push(`-P "${activeConn.password}"`);
                         p.push(`-i "${tmpFile}"`);
@@ -1781,13 +1665,13 @@ async function sqlRunner(): Promise<void> {
                         const user = encodeURIComponent(activeConn.user ?? 'postgres');
                         const pass = encodeURIComponent(activeConn.password ?? '');
                         const url  = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                        cmd = `psql "${url}" -X -t -A -f "${tmpFile}"`;
+                        cmd = `${resolveDbTool('psql')} "${url}" -X -t -A -f "${tmpFile}"`;
                         break;
                     }
                     case 'oracle': {
                         explainSql = `EXPLAIN PLAN FOR\n${sql};\nSELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);\nEXIT\n`;
                         fs.writeFileSync(tmpFile, explainSql, 'utf-8');
-                        cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
+                        cmd = `${resolveDbTool('sqlplus')} -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
                         break;
                     }
                 }
@@ -1798,10 +1682,10 @@ async function sqlRunner(): Promise<void> {
                     });
                 });
                 const tree = parseExplainPlan(output, activeConn.type);
-                sqlPanel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
+                appState.sqlPanel?.webview.postMessage({ command: 'explainResult', tree, dbType: activeConn.type });
             } catch (e: unknown) {
                 const text = e instanceof Error ? e.message : String(e);
-                sqlPanel?.webview.postMessage({ command: 'explainError', text });
+                appState.sqlPanel?.webview.postMessage({ command: 'explainError', text });
             } finally {
                 try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
             }
@@ -1822,23 +1706,22 @@ async function sqlRunner(): Promise<void> {
 
         if (!activeConn) {
             sqlOut().appendLine('[SQL Runner] No connection — sending error to webview.');
-            sqlPanel?.webview.postMessage({ command: 'error', text: 'No OpenBase project found in workspace.\nappsettings.json with ConnectionStrings is required.' });
+            appState.sqlPanel?.webview.postMessage({ command: 'error', text: 'No OpenBase project found in workspace.\nappsettings.json with ConnectionStrings is required.' });
             return;
         }
 
-        sqlPanel?.webview.postMessage({ command: 'running' });
+        appState.sqlPanel?.webview.postMessage({ command: 'running' });
         sqlOut().appendLine('[SQL Runner] Sent "running" to webview.');
 
         const tmpFile = path.join(os.tmpdir(), `ob_sql_${Date.now()}.sql`);
-        const extraPath = dotnetToolsPath();
-        const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const env = dbCliEnv();
         let cmd = '';
 
         try {
             switch (activeConn.type) {
                 case 'sqlserver': {
                     fs.writeFileSync(tmpFile, sql, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
+                    const parts = [resolveDbTool('sqlcmd'), `-S "${activeConn.server}"`, `-d "${activeConn.database}"`];
                     if (activeConn.user)     parts.push(`-U "${activeConn.user}"`);
                     if (activeConn.password) parts.push(`-P "${activeConn.password}"`);
                     parts.push(`-i "${tmpFile}" -s "|" -W`);
@@ -1851,13 +1734,13 @@ async function sqlRunner(): Promise<void> {
                     const user = encodeURIComponent(activeConn.user ?? 'postgres');
                     const pass = encodeURIComponent(activeConn.password ?? '');
                     const url  = `postgresql://${user}:${pass}@${activeConn.server}:${port}/${activeConn.database}`;
-                    cmd = `psql "${url}" --csv -f "${tmpFile}"`;
+                    cmd = `${resolveDbTool('psql')} "${url}" --csv -f "${tmpFile}"`;
                     break;
                 }
                 case 'oracle': {
                     const script = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSET FEEDBACK ON\n${sql}\n/\nEXIT\n`;
                     fs.writeFileSync(tmpFile, script, 'utf-8');
-                    cmd = `sqlplus -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
+                    cmd = `${resolveDbTool('sqlplus')} -S "${activeConn.user}/${activeConn.password ?? ''}@${activeConn.server}" @"${tmpFile}"`;
                     break;
                 }
             }
@@ -1866,27 +1749,27 @@ async function sqlRunner(): Promise<void> {
 
             const output = await new Promise<string>((resolve, reject) => {
                 const child = exec(cmd, { env, timeout: 30000 }, (err, stdout, stderr) => {
-                    sqlProcess = undefined;
+                    appState.sqlProcess = undefined;
                     sqlOut().appendLine(`[SQL Runner] exec done. err=${err?.message ?? 'none'} stdout=${stdout.length}b stderr=${stderr.length}b`);
                     if (err && !stdout) reject(new Error(stderr || err.message));
                     else resolve(stdout + (stderr ? '\n' + stderr : ''));
                 });
-                sqlProcess = child;
+                appState.sqlProcess = child;
             });
 
             const result = parseSqlOutput(output, activeConn.type);
             sqlOut().appendLine(`[SQL Runner] Result: ${result.columns.length} cols, ${result.rows.length} rows.`);
-            sqlPanel?.webview.postMessage({ command: 'result', ...result });
+            appState.sqlPanel?.webview.postMessage({ command: 'result', ...result });
 
             const prevEntries = extContext?.globalState.get<HistoryEntry[]>(SQL_HISTORY_KEY) ?? [];
             const newEntry: HistoryEntry = { sql, timestamp: Date.now(), connectionLabel: activeConn.label, rowCount: result.rows.length };
             const updatedEntries = [newEntry, ...prevEntries].slice(0, SQL_HISTORY_LIMIT);
             await extContext?.globalState.update(SQL_HISTORY_KEY, updatedEntries);
-            sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
+            appState.sqlPanel?.webview.postMessage({ command: 'loadHistory', entries: updatedEntries });
         } catch (e: unknown) {
             const text = e instanceof Error ? e.message : String(e);
             sqlOut().appendLine(`[SQL Runner] Error: ${text}`);
-            sqlPanel?.webview.postMessage({ command: 'error', text });
+            appState.sqlPanel?.webview.postMessage({ command: 'error', text });
         } finally {
             try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
         }
@@ -3629,41 +3512,6 @@ function buildHttpRunnerHtml(baseUrl: string, nonce: string, cspSource: string):
 </html>`;
 }
 
-// ─── runner sidebar (shared) ──────────────────────────────────────────────────
-
-class RunnerSidebarProvider implements vscode.WebviewViewProvider {
-    constructor(
-        private readonly label: string,
-        private readonly btnLabel: string,
-        private readonly open: () => void
-    ) {}
-
-    resolveWebviewView(view: vscode.WebviewView): void {
-        view.webview.options = { enableScripts: true };
-        view.webview.html = this._html();
-        view.onDidChangeVisibility(() => { if (view.visible) this.open(); });
-        view.webview.onDidReceiveMessage((msg) => { if (msg.command === 'open') this.open(); });
-    }
-
-    private _html(): string {
-        return /* html */`<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
-  body{font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:16px;text-align:center}
-  p{color:var(--vscode-descriptionForeground);font-size:12px;margin-bottom:12px}
-  button{padding:6px 12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-family:inherit;font-size:inherit;width:100%}
-  button:hover{background:var(--vscode-button-hoverBackground)}
-</style></head>
-<body>
-  <p>Click below to open ${this.label} in the editor.</p>
-  <button onclick="vscode.postMessage({command:'open'})">${this.btnLabel}</button>
-  <script>const vscode = acquireVsCodeApi();</script>
-</body></html>`;
-    }
-}
-
 // ─── SQL table browser ───────────────────────────────────────────────────────
 
 type TableItemKind = 'schema' | 'table' | 'procedure' | 'message';
@@ -3791,8 +3639,7 @@ class SqlTableTreeProvider implements vscode.TreeDataProvider<SqlTableItem> {
 }
 
 async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise<Map<string, { tables: string[]; procedures: string[]; functions: string[]; packages: string[]; dbType: DbTemplate }>> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const env = dbCliEnv();
     const tmpFile = path.join(os.tmpdir(), `ob_tables_${Date.now()}.sql`);
     let cmd = '';
 
@@ -3801,14 +3648,17 @@ async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise
     try {
         switch (conn.type) {
             case 'sqlserver': {
-                const schemaFilter = targetSchema ? `WHERE TABLE_SCHEMA = '${targetSchema}'` : '';
+                const tableWhere = targetSchema
+                    ? `WHERE TABLE_SCHEMA = '${targetSchema}' AND TABLE_TYPE='BASE TABLE'`
+                    : `WHERE TABLE_TYPE='BASE TABLE'`;
+                const routineWhere = targetSchema ? `WHERE ROUTINE_SCHEMA = '${targetSchema}'` : '';
                 const q = `
-                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES ${schemaFilter} AND TABLE_TYPE='BASE TABLE'
+                    SELECT TABLE_SCHEMA, TABLE_NAME, 'TABLE' AS TYPE FROM INFORMATION_SCHEMA.TABLES ${tableWhere}
                     UNION ALL
-                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ${targetSchema ? `WHERE ROUTINE_SCHEMA = '${targetSchema}'` : ''}
+                    SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ${routineWhere}
                     ORDER BY TABLE_SCHEMA, TYPE, TABLE_NAME`;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
-                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                const parts = [resolveDbTool('sqlcmd'), `-S "${conn.server}"`, `-d "${conn.database}"`];
                 if (conn.user)     parts.push(`-U "${conn.user}"`);
                 if (conn.password) parts.push(`-P "${conn.password}"`);
                 parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
@@ -3826,7 +3676,7 @@ async function loadSqlTables(conn: DbConnection, targetSchema?: string): Promise
                 const port = conn.port ?? '5432';
                 const u = encodeURIComponent(conn.user ?? 'postgres');
                 const p = encodeURIComponent(conn.password ?? '');
-                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                cmd = `${resolveDbTool('psql')} "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
                 break;
             }
             case 'oracle': {
@@ -3838,7 +3688,7 @@ SELECT OWNER, TABLE_NAME AS NAME, 'TABLE' AS OBJECT_TYPE FROM ALL_TABLES WHERE O
 EXIT
 `;
                 fs.writeFileSync(tmpFile, q, 'utf-8');
-                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                cmd = `${resolveDbTool('sqlplus')} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
             }
         }
@@ -3949,8 +3799,7 @@ async function loadTableDetails(
     schema: string,
     table: string,
 ): Promise<{ columns: TableColumn[]; constraints: TableConstraint[] }> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const env = dbCliEnv();
     const ts = Date.now();
     const colFile = path.join(os.tmpdir(), `ob_cols_${ts}.sql`);
     const conFile = path.join(os.tmpdir(), `ob_cons_${ts}.sql`);
@@ -3968,8 +3817,9 @@ async function loadTableDetails(
             const conQ = `SELECT tc.CONSTRAINT_TYPE, tc.CONSTRAINT_NAME, kcu.COLUMN_NAME, ISNULL(ccu.TABLE_SCHEMA,'') AS RS, ISNULL(ccu.TABLE_NAME,'') AS RT, ISNULL(ccu.COLUMN_NAME,'') AS RC FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON tc.CONSTRAINT_NAME=kcu.CONSTRAINT_NAME AND tc.TABLE_SCHEMA=kcu.TABLE_SCHEMA AND tc.TABLE_NAME=kcu.TABLE_NAME LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc ON tc.CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu ON rc.UNIQUE_CONSTRAINT_NAME=ccu.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA='${s}' AND tc.TABLE_NAME='${t}' ORDER BY tc.CONSTRAINT_TYPE, kcu.ORDINAL_POSITION`;
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
-            colCmd = `sqlcmd -S "${conn.server}" -d "${conn.database}" ${auth} -i "${colFile}" -s "|" -W -h -1`;
-            conCmd = `sqlcmd -S "${conn.server}" -d "${conn.database}" ${auth} -i "${conFile}" -s "|" -W -h -1`;
+            const sqlcmd = resolveDbTool('sqlcmd');
+            colCmd = `${sqlcmd} -S "${conn.server}" -d "${conn.database}" ${auth} -i "${colFile}" -s "|" -W -h -1`;
+            conCmd = `${sqlcmd} -S "${conn.server}" -d "${conn.database}" ${auth} -i "${conFile}" -s "|" -W -h -1`;
             break;
         }
         case 'pgsql': {
@@ -3982,8 +3832,9 @@ async function loadTableDetails(
             const conQ = `SELECT tc.constraint_type, tc.constraint_name, kcu.column_name, COALESCE(ccu.table_schema,'') AS rs, COALESCE(ccu.table_name,'') AS rt, COALESCE(ccu.column_name,'') AS rc FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema AND tc.table_name=kcu.table_name LEFT JOIN information_schema.referential_constraints rfk ON tc.constraint_name=rfk.constraint_name LEFT JOIN information_schema.constraint_column_usage ccu ON rfk.unique_constraint_name=ccu.constraint_name WHERE tc.table_schema='${s}' AND tc.table_name='${t}' ORDER BY tc.constraint_type, kcu.ordinal_position`;
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
-            colCmd = `psql "${dsn}" --csv -f "${colFile}"`;
-            conCmd = `psql "${dsn}" --csv -f "${conFile}"`;
+            const psql = resolveDbTool('psql');
+            colCmd = `${psql} "${dsn}" --csv -f "${colFile}"`;
+            conCmd = `${psql} "${dsn}" --csv -f "${conFile}"`;
             break;
         }
         case 'oracle': {
@@ -3991,8 +3842,9 @@ async function loadTableDetails(
             const conQ = `SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT uc.CONSTRAINT_TYPE, uc.CONSTRAINT_NAME, ucc.COLUMN_NAME, NVL(rc.OWNER,' ') AS RS, NVL(rc.TABLE_NAME,' ') AS RT, NVL(rcc.COLUMN_NAME,' ') AS RC FROM ALL_CONSTRAINTS uc JOIN ALL_CONS_COLUMNS ucc ON uc.CONSTRAINT_NAME=ucc.CONSTRAINT_NAME AND uc.OWNER=ucc.OWNER LEFT JOIN ALL_CONSTRAINTS rc ON uc.R_CONSTRAINT_NAME=rc.CONSTRAINT_NAME LEFT JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME=rcc.CONSTRAINT_NAME AND rcc.POSITION=1 WHERE uc.OWNER='${s.toUpperCase()}' AND uc.TABLE_NAME='${t.toUpperCase()}' AND uc.CONSTRAINT_TYPE IN ('P','R','U') ORDER BY uc.CONSTRAINT_TYPE, ucc.POSITION;\n/\nEXIT\n`;
             fs.writeFileSync(colFile, colQ, 'utf-8');
             fs.writeFileSync(conFile, conQ, 'utf-8');
-            colCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
-            conCmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${conFile}"`;
+            const sqlplus = resolveDbTool('sqlplus');
+            colCmd = `${sqlplus} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${colFile}"`;
+            conCmd = `${sqlplus} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${conFile}"`;
             break;
         }
     }
@@ -5054,20 +4906,18 @@ async function openTableInspector(
     }
 }
 
-let sqlTableProvider: SqlTableTreeProvider | undefined;
-
 function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
-    sqlTableProvider = new SqlTableTreeProvider();
+    appState.sqlTableProvider = new SqlTableTreeProvider();
 
     const treeView = vscode.window.createTreeView('openbase.sqlrunner.tables', {
-        treeDataProvider: sqlTableProvider,
+        treeDataProvider: appState.sqlTableProvider,
         showCollapseAll: true,
     });
-    sqlTableProvider.setTreeView(treeView);
+    appState.sqlTableProvider.setTreeView(treeView);
     context.subscriptions.push(treeView);
 
     context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(() => sqlTableProvider?.refresh()),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => appState.sqlTableProvider?.refresh()),
 
         vscode.commands.registerCommand('openbase.sqlRunner.tables.changeSchema', async () => {
             const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -5079,14 +4929,13 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
             
             let schemas: string[] = [];
             const tmpFile = path.join(os.tmpdir(), `ob_schemas_${Date.now()}.sql`);
-            const extraPath = dotnetToolsPath();
-            const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+            const env = dbCliEnv();
 
             try {
                 if (conn.type === 'oracle') {
                     const q = `SET PAGESIZE 0\nSET FEEDBACK OFF\nSET HEADING OFF\nSELECT DISTINCT username FROM all_users ORDER BY username;\nEXIT\n`;
                     fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                    const cmd = `${resolveDbTool('sqlplus')} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                     const stdout = await new Promise<string>((resolve, reject) => {
                         exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
                     });
@@ -5097,7 +4946,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
                     const port = conn.port ?? '5432';
                     const u = encodeURIComponent(conn.user ?? 'postgres');
                     const p = encodeURIComponent(conn.password ?? '');
-                    const cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" -t -A -f "${tmpFile}"`;
+                    const cmd = `${resolveDbTool('psql')} "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" -t -A -f "${tmpFile}"`;
                     const stdout = await new Promise<string>((resolve, reject) => {
                         exec(cmd, { env }, (err, out, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(out));
                     });
@@ -5105,7 +4954,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
                 } else if (conn.type === 'sqlserver') {
                     const q = `SELECT name FROM sys.schemas WHERE name NOT IN ('sys', 'information_schema', 'guest') ORDER BY name`;
                     fs.writeFileSync(tmpFile, q, 'utf-8');
-                    const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                    const parts = [resolveDbTool('sqlcmd'), `-S "${conn.server}"`, `-d "${conn.database}"`];
                     if (conn.user)     parts.push(`-U "${conn.user}"`);
                     if (conn.password) parts.push(`-P "${conn.password}"`);
                     parts.push(`-i "${tmpFile}" -W -h -1`);
@@ -5118,7 +4967,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
                 
                 const selected = await vscode.window.showQuickPick(schemas, { placeHolder: 'Select a schema' });
                 if (selected) {
-                    await sqlTableProvider?.refresh(selected);
+                    await appState.sqlTableProvider?.refresh(selected);
                 }
             } catch (e) {
                 vscode.window.showErrorMessage('Failed to fetch schemas: ' + (e instanceof Error ? e.message : String(e)));
@@ -5128,7 +4977,7 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
         }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.tables.refresh',
-            () => sqlTableProvider?.refresh()),
+            () => appState.sqlTableProvider?.refresh()),
 
         vscode.commands.registerCommand('openbase.sqlRunner.tables.select',
             async (item: SqlTableItem) => {
@@ -5154,19 +5003,19 @@ function setupSqlTableBrowser(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('openbase.sqlRunner.tables.filter', () => {
             const inputBox = vscode.window.createInputBox();
             inputBox.placeholder = 'Filter tables...';
-            inputBox.value = sqlTableProvider?.filterText ?? '';
-            inputBox.onDidChangeValue(text => sqlTableProvider?.setFilter(text));
+            inputBox.value = appState.sqlTableProvider?.filterText ?? '';
+            inputBox.onDidChangeValue(text => appState.sqlTableProvider?.setFilter(text));
             inputBox.onDidAccept(() => inputBox.hide());
             inputBox.onDidHide(() => inputBox.dispose());
             inputBox.show();
         }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.tables.clearFilter', () => {
-            sqlTableProvider?.setFilter('');
+            appState.sqlTableProvider?.setFilter('');
         }),
     );
 
-    sqlTableProvider.refresh();
+    appState.sqlTableProvider.refresh();
 }
 
 // ─── SQL script library ───────────────────────────────────────────────────────
@@ -5177,9 +5026,6 @@ function getScriptsDir(): string | undefined {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     return cwd ? path.join(cwd, SQL_SCRIPTS_SUBDIR) : undefined;
 }
-
-let sqlPendingScript: { content: string; name: string } | undefined;
-let sqlScriptProvider: SqlScriptTreeProvider | undefined;
 
 type ScriptItemKind = 'script' | 'folder';
 
@@ -5237,11 +5083,11 @@ class SqlScriptTreeProvider implements vscode.TreeDataProvider<SqlScriptItem> {
 async function openScriptInSqlRunner(filePath: string, directContent?: string): Promise<void> {
     const content = directContent ?? fs.readFileSync(filePath, 'utf-8');
     const name = directContent ? '' : path.basename(filePath);
-    if (sqlPanel) {
-        sqlPanel.reveal(vscode.ViewColumn.One);
-        sqlPanel.webview.postMessage({ command: 'loadScript', content, name });
+    if (appState.sqlPanel) {
+        appState.sqlPanel.reveal(vscode.ViewColumn.One);
+        appState.sqlPanel.webview.postMessage({ command: 'loadScript', content, name });
     } else {
-        sqlPendingScript = { content, name };
+        appState.sqlPendingScript = { content, name };
         await sqlRunner();
     }
 }
@@ -5257,26 +5103,26 @@ async function promptScriptName(prompt: string, initial?: string): Promise<strin
 }
 
 function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
-    sqlScriptProvider = new SqlScriptTreeProvider();
+    appState.sqlScriptProvider = new SqlScriptTreeProvider();
 
     context.subscriptions.push(
         vscode.window.createTreeView('openbase.sqlrunner.scripts', {
-            treeDataProvider: sqlScriptProvider,
+            treeDataProvider: appState.sqlScriptProvider,
             showCollapseAll: true,
         }),
 
         (() => {
             const w = vscode.workspace.createFileSystemWatcher(`**/${SQL_SCRIPTS_SUBDIR}/**`);
-            w.onDidCreate(() => sqlScriptProvider?.refresh());
-            w.onDidDelete(() => sqlScriptProvider?.refresh());
-            w.onDidChange(() => sqlScriptProvider?.refresh());
+            w.onDidCreate(() => appState.sqlScriptProvider?.refresh());
+            w.onDidDelete(() => appState.sqlScriptProvider?.refresh());
+            w.onDidChange(() => appState.sqlScriptProvider?.refresh());
             return w;
         })(),
 
-        vscode.workspace.onDidChangeWorkspaceFolders(() => sqlScriptProvider?.refresh()),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => appState.sqlScriptProvider?.refresh()),
 
         vscode.commands.registerCommand('openbase.sqlRunner.scripts.refresh',
-            () => sqlScriptProvider?.refresh()),
+            () => appState.sqlScriptProvider?.refresh()),
 
         vscode.commands.registerCommand('openbase.sqlRunner.scripts.new',
             async (item?: SqlScriptItem) => {
@@ -5288,7 +5134,7 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
                 if (fs.existsSync(file)) { vscode.window.showErrorMessage(`"${path.basename(file)}" already exists.`); return; }
                 fs.mkdirSync(baseDir, { recursive: true });
                 fs.writeFileSync(file, '', 'utf-8');
-                sqlScriptProvider?.refresh();
+                appState.sqlScriptProvider?.refresh();
                 await openScriptInSqlRunner(file);
             }),
 
@@ -5299,7 +5145,7 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
                 const name = await promptScriptName('Folder name');
                 if (!name) return;
                 fs.mkdirSync(path.join(baseDir, name), { recursive: true });
-                sqlScriptProvider?.refresh();
+                appState.sqlScriptProvider?.refresh();
             }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.scripts.open',
@@ -5313,7 +5159,7 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
                 if (!name || name === display) return;
                 const newName = item.kind === 'script' ? name.replace(/\.sql$/i, '') + '.sql' : name;
                 fs.renameSync(item.fsPath, path.join(path.dirname(item.fsPath), newName));
-                sqlScriptProvider?.refresh();
+                appState.sqlScriptProvider?.refresh();
             }),
 
         vscode.commands.registerCommand('openbase.sqlRunner.scripts.delete',
@@ -5323,7 +5169,7 @@ function setupSqlScriptLibrary(context: vscode.ExtensionContext): void {
                 if (ans !== 'Delete') return;
                 if (item.kind === 'folder') fs.rmSync(item.fsPath, { recursive: true, force: true });
                 else fs.unlinkSync(item.fsPath);
-                sqlScriptProvider?.refresh();
+                appState.sqlScriptProvider?.refresh();
             }),
     );
 }
@@ -6319,15 +6165,14 @@ function listMigrationsFromFs(migrationsDir: string): string[] {
 }
 
 async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const env = dbCliEnv();
     const tmpFile = path.join(os.tmpdir(), `ob_efmig_${Date.now()}.sql`);
     let cmd = '';
     try {
         switch (conn.type) {
             case 'sqlserver': {
                 fs.writeFileSync(tmpFile, 'SELECT MigrationId FROM [dbo].[__EFMigrationsHistory]', 'utf-8');
-                const parts = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                const parts = [resolveDbTool('sqlcmd'), `-S "${conn.server}"`, `-d "${conn.database}"`];
                 if (conn.user)     parts.push(`-U "${conn.user}"`);
                 if (conn.password) parts.push(`-P "${conn.password}"`);
                 parts.push(`-i "${tmpFile}" -s "|" -W -h -1`);
@@ -6339,12 +6184,12 @@ async function getAppliedMigrations(conn: DbConnection): Promise<Set<string>> {
                 const port = conn.port ?? '5432';
                 const u = encodeURIComponent(conn.user ?? 'postgres');
                 const p = encodeURIComponent(conn.password ?? '');
-                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                cmd = `${resolveDbTool('psql')} "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
                 break;
             }
             case 'oracle': {
                 fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT \"MigrationId\" FROM \"__EFMigrationsHistory\";\n/\nEXIT\n", 'utf-8');
-                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                cmd = `${resolveDbTool('sqlplus')} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
             }
             default:
@@ -6441,15 +6286,14 @@ function listFmMigrationsFromFs(dir: string): Array<{ version: string; label: st
 }
 
 async function getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> {
-    const extraPath = dotnetToolsPath();
-    const env = { ...process.env, PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ''}` };
+    const env = dbCliEnv();
     const tmpFile = path.join(os.tmpdir(), `ob_fmmig_${Date.now()}.sql`);
     try {
         let cmd = '';
         switch (conn.type) {
             case 'sqlserver': {
                 fs.writeFileSync(tmpFile, 'SELECT CAST(Version AS VARCHAR(50)) FROM VersionInfo', 'utf-8');
-                const p = ['sqlcmd', `-S "${conn.server}"`, `-d "${conn.database}"`];
+                const p = [resolveDbTool('sqlcmd'), `-S "${conn.server}"`, `-d "${conn.database}"`];
                 if (conn.user)     p.push(`-U "${conn.user}"`);
                 if (conn.password) p.push(`-P "${conn.password}"`);
                 p.push(`-i "${tmpFile}" -s "|" -W -h -1`);
@@ -6461,12 +6305,12 @@ async function getAppliedFmMigrations(conn: DbConnection): Promise<Set<string>> 
                 const port = conn.port ?? '5432';
                 const u = encodeURIComponent(conn.user ?? 'postgres');
                 const p = encodeURIComponent(conn.password ?? '');
-                cmd = `psql "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
+                cmd = `${resolveDbTool('psql')} "postgresql://${u}:${p}@${conn.server}:${port}/${conn.database}" --csv -f "${tmpFile}"`;
                 break;
             }
             case 'oracle': {
                 fs.writeFileSync(tmpFile, "SET MARKUP CSV ON DELIMITER '|' QUOTE OFF\nSET PAGESIZE 50000\nSELECT CAST(\"Version\" AS VARCHAR(50)) FROM \"VersionInfo\";\n/\nEXIT\n", 'utf-8');
-                cmd = `sqlplus -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
+                cmd = `${resolveDbTool('sqlplus')} -S "${conn.user}/${conn.password ?? ''}@${conn.server}" @"${tmpFile}"`;
                 break;
             }
             default:
@@ -6726,7 +6570,7 @@ async function showMigrationScript(cwd: string, fromId?: string, toId?: string):
                 fs.mkdirSync(scriptsDir, { recursive: true });
                 fs.writeFileSync(path.join(scriptsDir, safeName), msg.sql, 'utf-8');
                 vscode.window.showInformationMessage(`Saved: ${safeName}`);
-                sqlScriptProvider?.refresh();
+                appState.sqlScriptProvider?.refresh();
             }
         });
     }
@@ -8067,7 +7911,7 @@ export function activate(context: vscode.ExtensionContext): void {
         reg('openbase.version',        version),
         vscode.commands.registerCommand('openbase.sqlRunner', () => sqlRunner()),
         vscode.commands.registerCommand('openbase.httpRunner', () => httpRunner()),
-        vscode.commands.registerCommand('openbase.sqlRunner.run', () => sqlPanel?.webview.postMessage({ command: 'triggerRun' })),
+        vscode.commands.registerCommand('openbase.sqlRunner.run', () => appState.sqlPanel?.webview.postMessage({ command: 'triggerRun' })),
         vscode.commands.registerCommand('openbase.httpRunner.send', () => httpPanel?.webview.postMessage({ command: 'triggerSend' })),
     );
 }
