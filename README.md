@@ -77,6 +77,16 @@ Comandos suportados incluem:
 
 Exemplo: `@openbase implemente a issue #feature/101`
 
+### SQL Runner CLI paths (Windows/Linux/macOS)
+If SQL Runner cannot find `psql`, `sqlcmd`, or `sqlplus`, configure explicit tool paths in settings:
+
+- `openbase.dbTools.psqlPath`
+- `openbase.dbTools.sqlcmdPath`
+- `openbase.dbTools.sqlplusPath`
+- `openbase.dbTools.prependPaths`
+
+These settings are used by SQL Runner, schema browser, and migration status queries.
+
 ### New Project
 1. Open the Command Palette (`Ctrl+Shift+P`) → **New Project**
 2. Fill in the details and follow the instructions in the output panel.

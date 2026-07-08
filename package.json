@@ -2,7 +2,7 @@
   "name": "openbase",
   "displayName": "OpenBase CLI Tool",
   "description": "Visual Studio Code extension for OpenBase CLI",
-  "version": "10.13.7",
+  "version": "10.13.8",
   "publisher": "RodrigoSoaresdeBrito",
   "icon": "icon.png",
   "engines": {
@@ -90,6 +90,29 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically save SQL scripts and HTTP requests while editing."
+        },
+        "openbase.dbTools.psqlPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path or command for PostgreSQL psql executable used by SQL Runner (e.g. C:/Program Files/PostgreSQL/17/bin/psql.exe)."
+        },
+        "openbase.dbTools.sqlcmdPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path or command for SQL Server sqlcmd executable used by SQL Runner."
+        },
+        "openbase.dbTools.sqlplusPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path or command for Oracle sqlplus executable used by SQL Runner."
+        },
+        "openbase.dbTools.prependPaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional directories to prepend to PATH when running database CLI tools."
         }
       }
     },
